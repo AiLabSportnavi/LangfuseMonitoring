@@ -128,12 +128,28 @@ nmap -Pn -p 5432,8123,9000,9001,6379 <server-ip>                             # a
 
 ## 5. Known behaviours
 
+> 📖 **If anything fails to start, read [`DEPLOYMENT-PITFALLS.md`](DEPLOYMENT-PITFALLS.md)
+> before debugging.** It documents nine failures already hit and fixed during Stage 1A,
+> several of which present as a completely different problem than they are — including
+> a healthy service marked unhealthy, and an app that never started looking like an app
+> that was slow to start. It ends with a diagnostic checklist.
+
 **ClickHouse system-table TTLs.** `infra/clickhouse/config.d/langfuse-ttl.xml`
 uses two different forms deliberately — bare `<ttl>` for most tables, a full
 element replacement for `opentelemetry_span_log`. ClickHouse rejects mixing
 `<engine>` with `<partition_by>`/`<ttl>`, and which form is legal depends on what
 the stock `config.xml` ships per table. Getting this wrong prevents the server
 from starting at all (exit 36). The file documents the mapping; do not "tidy" it.
+
+**Mount the ClickHouse config file, not the directory.** Mounting over
+`/etc/clickhouse-server/config.d` hides the image's own `docker_related_config.xml`
+and ClickHouse then binds loopback only — healthy to its own probe, unreachable to
+web and worker.
+
+**Healthchecks address `127.0.0.1`, never `localhost`.** Where IPv6 is disabled,
+`localhost` resolves to `::1` first and the probe is refused against a perfectly
+healthy service. Combined with `depends_on: service_healthy`, that silently stops
+everything downstream from starting.
 
 **Editing a bind-mounted config does not restart the service.** Compose sees no
 change to the container spec. Use `docker compose up -d --force-recreate <svc>`.
