@@ -50,6 +50,113 @@ Upgrades follow the flow in CLAUDE.md §14. Never edit a tag in place on the ser
 
 ---
 
+## 2.5 Preparing a fresh Hetzner host
+
+Run once, on a new box, before anything else.
+
+### a. Order the server
+
+Hetzner Robot → dedicated, **EU location** (Falkenstein / Nuremberg / Helsinki) for
+GDPR residency. AX102-class: ~16 cores, 128 GB RAM, ~3.8 TB NVMe, ~€105/mo. Install
+Ubuntu 24.04 LTS.
+
+> Hetzner *Cloud* (CX/CPX) is cheaper but tops out well below what ClickHouse needs at
+> this trace depth. Tier 1 assumes dedicated.
+
+### b. Point DNS at it — before first start
+
+Create an `A` record for your domain pointing at the server IP and wait for it to
+resolve. Caddy performs an ACME HTTP-01 challenge on first boot; if DNS is not live,
+certificate issuance fails and you will debug TLS instead of Langfuse.
+
+```bash
+dig +short langfuse.yourdomain.com    # must return the server IP
+```
+
+### c. Harden SSH and firewall
+
+```bash
+ssh root@<server-ip>
+
+adduser --disabled-password --gecos "" deploy
+usermod -aG sudo deploy
+rsync --archive --chown=deploy:deploy ~/.ssh /home/deploy
+
+# Key-only SSH.
+sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication no/' /etc/ssh/sshd_config
+sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin no/' /etc/ssh/sshd_config
+systemctl restart ssh
+
+# Only SSH, HTTP and HTTPS. Nothing else, ever.
+ufw default deny incoming && ufw default allow outgoing
+ufw allow 22/tcp && ufw allow 80/tcp && ufw allow 443/tcp
+ufw --force enable && ufw status verbose
+```
+
+**Postgres (5432), ClickHouse (8123/9000), Valkey (6379) and MinIO (9001) must never
+be reachable.** The compose stack publishes no host ports for them, and `ufw` is the
+second layer. Do not add a rule "temporarily to debug".
+
+> **Docker bypasses ufw.** Docker writes its own iptables rules and a published port
+> is reachable regardless of ufw. This stack only publishes 80/443 (via Caddy), so it
+> is safe — but never add a `ports:` mapping to a data service expecting ufw to cover
+> you.
+
+### d. Install Docker
+
+```bash
+curl -fsSL https://get.docker.com | sh
+usermod -aG docker deploy
+systemctl enable --now docker
+docker --version && docker compose version
+```
+
+### e. Set the host clock to UTC
+
+```bash
+timedatectl set-timezone UTC && timedatectl
+```
+
+Non-negotiable. A wrong timezone corrupts analytics silently, and containers inherit
+the host clock even though every service also sets `TZ=UTC`.
+
+### f. Clone the repository
+
+The repo is **private**, so the server needs read access. Generate a deploy key:
+
+```bash
+ssh-keygen -t ed25519 -C "langfuse-deploy" -f ~/.ssh/id_ed25519 -N ""
+cat ~/.ssh/id_ed25519.pub
+```
+
+Add that public key at **Settings → Deploy keys → Add deploy key** on the GitHub repo
+(read-only; do not tick write access). Then:
+
+```bash
+git clone git@github.com:AiLabSportnavi/LangfuseMonitoring.git
+cd LangfuseMonitoring
+```
+
+### g. Choose the admin allowlist carefully
+
+`ADMIN_ALLOWLIST` decides who can reach the UI. **Set it wrong and you lock yourself
+out of your own dashboard** — ingest keeps working, so the platform looks healthy while
+being unusable.
+
+```bash
+curl -s https://ifconfig.me      # your current public IP
+```
+
+- **Static office/VPN IP** → use it: `ADMIN_ALLOWLIST=203.0.113.7/32`
+- **Dynamic residential IP** → do **not** hardcode it; it will change and lock you out.
+  Put the box on a VPN (WireGuard/Tailscale) and allowlist the VPN range instead.
+
+Recovery if you are locked out: SSH in and query the container directly —
+`docker compose exec web wget -qO- http://127.0.0.1:3000/api/public/ready` — or widen
+the allowlist in `infra/.env` and `docker compose up -d --force-recreate caddy`.
+
+---
+
 ## 3. First bring-up
 
 ```bash
