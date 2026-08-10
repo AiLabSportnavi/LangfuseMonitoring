@@ -1,0 +1,222 @@
+name: langfuse
+
+# Tier 1: all six Langfuse components on one Hetzner box.
+#
+# Image tags are pinned deliberately and verified against the registry.
+# Never use :latest — an unpinned deployment is not reproducible, and a
+# ClickHouse major bump can carry an irreversible schema migration.
+#
+#   langfuse/langfuse            4.6.0
+#   langfuse/langfuse-worker     4.6.0   (must match web exactly)
+#   clickhouse/clickhouse-server 25.12   (the version upstream Langfuse tests against)
+#   postgres                     17
+#   valkey/valkey                8
+#   minio/minio                  RELEASE.2025-09-07T16-13-09Z
+#
+# Upgrades go through the flow in CLAUDE.md §14, never by editing a tag in place
+# on the server.
+
+x-langfuse-env: &langfuse-env
+  DATABASE_URL: ${DATABASE_URL}
+  SALT: ${SALT}
+  ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+
+  CLICKHOUSE_URL: ${CLICKHOUSE_URL}
+  CLICKHOUSE_USER: ${CLICKHOUSE_USER}
+  CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+  CLICKHOUSE_MIGRATION_URL: ${CLICKHOUSE_MIGRATION_URL}
+  CLICKHOUSE_CLUSTER_ENABLED: ${CLICKHOUSE_CLUSTER_ENABLED}
+
+  REDIS_CONNECTION_STRING: ${REDIS_CONNECTION_STRING}
+  # Valkey reports its own version string, which BullMQ's Redis version check
+  # can reject even though Valkey 8 is wire-compatible with Redis 7.2.
+  LANGFUSE_BULLMQ_SKIP_REDIS_VERSION_CHECK: "true"
+
+  LANGFUSE_S3_EVENT_UPLOAD_BUCKET: ${LANGFUSE_S3_EVENT_UPLOAD_BUCKET}
+  LANGFUSE_S3_EVENT_UPLOAD_REGION: ${LANGFUSE_S3_EVENT_UPLOAD_REGION}
+  LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID: ${LANGFUSE_S3_EVENT_UPLOAD_ACCESS_KEY_ID}
+  LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_S3_EVENT_UPLOAD_SECRET_ACCESS_KEY}
+  LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT: ${LANGFUSE_S3_EVENT_UPLOAD_ENDPOINT}
+  LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE: ${LANGFUSE_S3_EVENT_UPLOAD_FORCE_PATH_STYLE}
+  LANGFUSE_S3_EVENT_UPLOAD_PREFIX: ${LANGFUSE_S3_EVENT_UPLOAD_PREFIX}
+
+  # Required by v4 — the app will not start without a media bucket.
+  LANGFUSE_S3_MEDIA_UPLOAD_BUCKET: ${LANGFUSE_S3_MEDIA_UPLOAD_BUCKET}
+  LANGFUSE_S3_MEDIA_UPLOAD_REGION: ${LANGFUSE_S3_MEDIA_UPLOAD_REGION}
+  LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID: ${LANGFUSE_S3_MEDIA_UPLOAD_ACCESS_KEY_ID}
+  LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY: ${LANGFUSE_S3_MEDIA_UPLOAD_SECRET_ACCESS_KEY}
+  LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT: ${LANGFUSE_S3_MEDIA_UPLOAD_ENDPOINT}
+  LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE: ${LANGFUSE_S3_MEDIA_UPLOAD_FORCE_PATH_STYLE}
+  LANGFUSE_S3_MEDIA_UPLOAD_PREFIX: ${LANGFUSE_S3_MEDIA_UPLOAD_PREFIX}
+
+  LANGFUSE_S3_CONCURRENT_WRITES: ${LANGFUSE_S3_CONCURRENT_WRITES}
+  TELEMETRY_ENABLED: ${TELEMETRY_ENABLED}
+  TZ: UTC
+
+services:
+  web:
+    image: langfuse/langfuse:4.6.0
+    depends_on:
+      postgres: { condition: service_healthy }
+      clickhouse: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      minio-init: { condition: service_completed_successfully }
+    environment:
+      <<: *langfuse-env
+      NEXTAUTH_URL: ${NEXTAUTH_URL}
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
+      LANGFUSE_INIT_ORG_ID: ${LANGFUSE_INIT_ORG_ID}
+      LANGFUSE_INIT_ORG_NAME: ${LANGFUSE_INIT_ORG_NAME}
+      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_INIT_USER_EMAIL}
+      LANGFUSE_INIT_USER_NAME: ${LANGFUSE_INIT_USER_NAME}
+      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD}
+      # Set per-project by scripts/provision-project.sh.
+      LANGFUSE_INIT_PROJECT_ID: ${LANGFUSE_INIT_PROJECT_ID:-}
+      LANGFUSE_INIT_PROJECT_NAME: ${LANGFUSE_INIT_PROJECT_NAME:-}
+      LANGFUSE_INIT_PROJECT_RETENTION: ${LANGFUSE_INIT_PROJECT_RETENTION:-}
+      LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_INIT_PROJECT_PUBLIC_KEY:-}
+      LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_INIT_PROJECT_SECRET_KEY:-}
+    healthcheck:
+      # /api/public/ready returns 500 after SIGTERM, so traffic drains on shutdown.
+      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/public/ready"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 120s
+    restart: unless-stopped
+    networks: [langfuse]
+
+  worker:
+    image: langfuse/langfuse-worker:4.6.0
+    depends_on:
+      postgres: { condition: service_healthy }
+      clickhouse: { condition: service_healthy }
+      redis: { condition: service_healthy }
+      minio-init: { condition: service_completed_successfully }
+    environment:
+      <<: *langfuse-env
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3030/api/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 60s
+    restart: unless-stopped
+    networks: [langfuse]
+
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      TZ: UTC
+      PGTZ: UTC
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks: [langfuse]
+
+  clickhouse:
+    image: clickhouse/clickhouse-server:25.12-alpine
+    environment:
+      CLICKHOUSE_DB: default
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      # Without this the entrypoint leaves the default user passwordless.
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+      TZ: UTC
+    volumes:
+      # Disk protection. Must be present before the first byte is ingested.
+      - ./clickhouse/config.d:/etc/clickhouse-server/config.d:ro
+      - clickhouse_data:/var/lib/clickhouse
+      - clickhouse_logs:/var/log/clickhouse-server
+    ulimits:
+      nofile: { soft: 262144, hard: 262144 }
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8123/ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+    restart: unless-stopped
+    networks: [langfuse]
+
+  redis:
+    image: valkey/valkey:8-alpine
+    # noeviction is deliberate: Valkey holds the ingestion queue, and evicting
+    # keys would silently discard queued events. Alert on memory pressure
+    # instead of evicting. See CLAUDE.md §8.5 for the 1GB/100k-events-per-minute
+    # sizing rule.
+    command: ["valkey-server", "--requirepass", "${REDIS_AUTH}", "--maxmemory-policy", "noeviction"]
+    environment:
+      TZ: UTC
+      # Referenced by the healthcheck so the password never appears in `ps` output.
+      REDIS_AUTH: ${REDIS_AUTH}
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "valkey-cli -a \"$$REDIS_AUTH\" ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+    networks: [langfuse]
+
+  minio:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    command: server /data --address ":9000" --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      TZ: UTC
+    volumes:
+      - minio_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "mc ready local || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 20s
+    restart: unless-stopped
+    networks: [langfuse]
+
+  # MinIO does not create buckets on its own. Langfuse fails at startup if the
+  # event or media bucket is absent, so create them before web/worker boot.
+  minio-init:
+    image: minio/minio:RELEASE.2025-09-07T16-13-09Z
+    depends_on:
+      minio: { condition: service_healthy }
+    environment:
+      TZ: UTC
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
+      EVENT_BUCKET: ${LANGFUSE_S3_EVENT_UPLOAD_BUCKET}
+      MEDIA_BUCKET: ${LANGFUSE_S3_MEDIA_UPLOAD_BUCKET}
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -e
+        mc alias set local http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD"
+        mc mb --ignore-existing "local/$$EVENT_BUCKET"
+        mc mb --ignore-existing "local/$$MEDIA_BUCKET"
+        echo "buckets ready: $$EVENT_BUCKET $$MEDIA_BUCKET"
+    restart: "no"
+    networks: [langfuse]
+
+volumes:
+  postgres_data:
+  clickhouse_data:
+  clickhouse_logs:
+  redis_data:
+  minio_data:
+
+networks:
+  langfuse:
+    driver: bridge
