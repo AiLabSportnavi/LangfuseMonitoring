@@ -210,12 +210,36 @@ services:
     restart: "no"
     networks: [langfuse]
 
+  # The only service permitted to publish host ports.
+  caddy:
+    image: caddy:2.11.4-alpine
+    depends_on:
+      web: { condition: service_healthy }
+    environment:
+      LANGFUSE_DOMAIN: ${LANGFUSE_DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL}
+      ADMIN_ALLOWLIST: ${ADMIN_ALLOWLIST}
+      TZ: UTC
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+      - caddy_logs:/var/log/caddy
+    restart: unless-stopped
+    networks: [langfuse]
+
 volumes:
   postgres_data:
   clickhouse_data:
   clickhouse_logs:
   redis_data:
   minio_data:
+  caddy_data:
+  caddy_config:
+  caddy_logs:
 
 networks:
   langfuse:

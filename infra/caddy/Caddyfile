@@ -1,0 +1,69 @@
+{
+	email {$ACME_EMAIL}
+}
+
+# Caddy is the ONLY ingress. Nothing else publishes a host port, which is what
+# keeps Postgres, ClickHouse, Valkey and MinIO off the public internet.
+#
+# The split below is a security boundary, not just a routing convenience:
+# telemetry ingest must be public because Vercel serverless functions have no
+# static egress IPs outside Enterprise Secure Compute, so they cannot be
+# IP-allowlisted. The admin surface has no such constraint and must not inherit
+# that exposure.
+{$LANGFUSE_DOMAIN} {
+	encode gzip
+
+	log {
+		# Per-project ingestion attribution starts here: when one project floods
+		# the endpoint, these logs are what identify it within minutes.
+		output file /var/log/caddy/access.log {
+			roll_size 100MiB
+			roll_keep 14
+		}
+		format json
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	# ── PUBLIC: telemetry ingest ────────────────────────────────────────────
+	# Protected by TLS + per-project API keys, never by network position.
+	@ingest path /api/public/otel* /api/public/ingestion*
+	handle @ingest {
+		request_body {
+			# Bounds accidental telemetry floods and malformed payloads. Deep
+			# traces (50-200 observations) batch well under this; raise only on
+			# observed 413s, and investigate why the batch is that large first.
+			max_size 10MB
+		}
+		reverse_proxy web:3000
+	}
+
+	# ── PUBLIC: health, for off-host external monitoring ────────────────────
+	# Langfuse must not be the only system that knows Langfuse is down, so the
+	# external monitor must reach these without being on the allowlist.
+	@health path /api/public/health /api/public/ready
+	handle @health {
+		reverse_proxy web:3000
+	}
+
+	# ── RESTRICTED: UI, admin, and every other route ────────────────────────
+	# remote_ip matches the direct peer, not X-Forwarded-For. trusted_proxies is
+	# deliberately not configured: Caddy is the edge here, and trusting XFF from
+	# private ranges would let a spoofed header bypass this allowlist.
+	@trusted remote_ip {$ADMIN_ALLOWLIST}
+	handle @trusted {
+		reverse_proxy web:3000
+	}
+
+	# Deny by default. This handler must never proxy — if it did, the entire
+	# admin surface would be public.
+	handle {
+		respond "Not authorized" 403
+	}
+}
