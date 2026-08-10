@@ -1,0 +1,25 @@
+# LOCAL VALIDATION ONLY — never used on the server.
+#
+# Must be passed explicitly:
+#   docker compose -f compose.yaml -f compose.local.yaml up -d
+#
+# It is deliberately NOT named compose.override.yaml, because that name is
+# auto-loaded and would silently publish the web port on the Hetzner box.
+#
+# Purpose: prove the stack boots, migrations run, and the ingestion canary
+# passes, without needing a domain or a public IP. Caddy is excluded — there is
+# no certificate to issue for localhost — so the ingest/UI split is verified
+# separately against the real host.
+services:
+  web:
+    environment:
+      # Login cookies are bound to this origin; the .env value points at the
+      # real domain, which would break local sign-in.
+      NEXTAUTH_URL: http://localhost:3000
+    # Bound to loopback only. Even locally this must not be reachable off-box.
+    ports:
+      - "127.0.0.1:3000:3000"
+
+  caddy:
+    # ACME cannot issue for localhost. Excluded from local runs.
+    profiles: ["disabled"]
