@@ -76,6 +76,14 @@ services:
       LANGFUSE_INIT_PROJECT_RETENTION: ${LANGFUSE_INIT_PROJECT_RETENTION:-}
       LANGFUSE_INIT_PROJECT_PUBLIC_KEY: ${LANGFUSE_INIT_PROJECT_PUBLIC_KEY:-}
       LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_INIT_PROJECT_SECRET_KEY:-}
+      # Next.js standalone binds to $HOSTNAME, and Docker sets HOSTNAME to the
+      # container ID. Left alone, the server binds ONLY the container's eth0 IP
+      # (e.g. 172.21.0.6:3000): reachable from Caddy, but the 127.0.0.1 probe
+      # below is refused, so the container is marked unhealthy while serving
+      # perfectly. Caddy gates on `web: service_healthy` and then never starts.
+      # Same class of failure as DEPLOYMENT-PITFALLS.md #3 — the probe is wrong,
+      # not the service. Upstream Langfuse's compose sets this for this reason.
+      HOSTNAME: "0.0.0.0"
     healthcheck:
       # /api/public/ready returns 500 after SIGTERM, so traffic drains on shutdown.
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/api/public/ready"]
@@ -95,6 +103,9 @@ services:
       minio-init: { condition: service_completed_successfully }
     environment:
       <<: *langfuse-env
+      # See the note on web: without this the worker binds only its eth0 IP and
+      # the loopback healthcheck below is refused.
+      HOSTNAME: "0.0.0.0"
     healthcheck:
       test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3030/api/health"]
       interval: 15s
