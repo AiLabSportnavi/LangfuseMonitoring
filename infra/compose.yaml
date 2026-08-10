@@ -78,7 +78,7 @@ services:
       LANGFUSE_INIT_PROJECT_SECRET_KEY: ${LANGFUSE_INIT_PROJECT_SECRET_KEY:-}
     healthcheck:
       # /api/public/ready returns 500 after SIGTERM, so traffic drains on shutdown.
-      test: ["CMD", "wget", "-qO-", "http://localhost:3000/api/public/ready"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3000/api/public/ready"]
       interval: 15s
       timeout: 5s
       retries: 10
@@ -96,7 +96,7 @@ services:
     environment:
       <<: *langfuse-env
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:3030/api/health"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3030/api/health"]
       interval: 15s
       timeout: 5s
       retries: 10
@@ -146,7 +146,7 @@ services:
     ulimits:
       nofile: { soft: 262144, hard: 262144 }
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:8123/ping"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8123/ping"]
       interval: 10s
       timeout: 5s
       retries: 10
