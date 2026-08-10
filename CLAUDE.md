@@ -398,22 +398,23 @@ ceiling (~70k events/min) Redis needs only single-digit GB — it is not the bot
 ### 8.6 Protect the disk — mandatory at Tier 1
 
 On a single box, ClickHouse's own system tables will consume the NVMe if left at defaults. Apply
-aggressive TTLs and disable the query profiler **at install time, not after the disk fills**:
+aggressive TTLs and disable the query profiler **at install time, not after the disk fills**.
 
-```xml
-<clickhouse>
-  <profiles><default>
-    <query_profiler_real_time_period_ns>0</query_profiler_real_time_period_ns>
-    <query_profiler_cpu_time_period_ns>0</query_profiler_cpu_time_period_ns>
-  </default></profiles>
-  <trace_log><engine>ENGINE = MergeTree PARTITION BY toYYYYMM(event_date)
-    ORDER BY (event_date, event_time) TTL event_date + INTERVAL 7 DAY</engine></trace_log>
-  <opentelemetry_span_log><engine>ENGINE = MergeTree PARTITION BY toYYYYMM(finish_date)
-    ORDER BY (finish_date, finish_time_us) TTL finish_date + INTERVAL 7 DAY</engine></opentelemetry_span_log>
-  <query_log><engine>ENGINE = MergeTree PARTITION BY toYYYYMM(event_date)
-    ORDER BY (event_date, event_time) TTL event_date + INTERVAL 30 DAY</engine></query_log>
-</clickhouse>
-```
+**Implemented in [`infra/clickhouse/config.d/langfuse-ttl.xml`](infra/clickhouse/config.d/langfuse-ttl.xml).**
+
+⚠️ **An earlier revision of this section prescribed an `<engine>`-based config for every table. That
+does not work** — verified empirically against ClickHouse 25.12, where it prevents the server from
+starting at all (exit 36). ClickHouse rejects mixing `<engine>` with `<partition_by>`/`<ttl>` in
+*both* directions, and which form is legal depends on what the stock `config.xml` ships per table:
+
+| Stock definition | Tables | Correct form |
+|---|---|---|
+| `<partition_by>` | `query_log`, `trace_log`, `part_log` | bare `<ttl>` |
+| neither | `metric_log`, `asynchronous_metric_log` | bare `<ttl>` |
+| `<engine>` | `opentelemetry_span_log` | replace the element; TTL **inside** the engine |
+
+The config file documents this mapping inline. Do not normalise it to one form — it is inconsistent
+because the upstream defaults are inconsistent.
 
 This is distinct from Langfuse's 90-day *trace* retention — it governs ClickHouse's internal
 logging, a common and avoidable cause of disk exhaustion on single-node deployments.
