@@ -37,16 +37,49 @@ Upgrades follow the flow in CLAUDE.md §14. Never edit a tag in place on the ser
 - DNS `A` record for `LANGFUSE_DOMAIN` pointing at the host, resolving **before**
   first start — Caddy needs it to complete the ACME challenge.
 - Inbound 80 and 443 open. **Nothing else.**
+- **Ports 80 and 443 must be free.** On a shared box they usually are not — see §2.1.
 
 > Record the actual server ID, region, and allowlist CIDRs here when the box is
 > provisioned. Infrastructure is code; hand-configured hosts are not acceptable.
 
 | Field | Value |
 |---|---|
-| Server | _to be filled at provisioning_ |
-| Region | _to be filled at provisioning_ |
-| Domain | _to be filled at provisioning_ |
-| Admin allowlist | _to be filled at provisioning_ |
+| Server | Hetzner dedicated, `Ubuntu-2404-noble-amd64-base` — 20 cores, 62 GB RAM, 1.7 TB NVMe |
+| Public IP | `5.9.95.174` |
+| Region | Hetzner EU |
+| Domain | `sportnavi-langfuse.sportnavi.de` |
+| Admin allowlist | `127.0.0.1/32 ::1/128 5.9.95.174/32 172.16.0.0/12 2.214.226.222/32` |
+| Deployed | 2026-08-10 — Langfuse 4.6.0 |
+
+> ⚠️ The box is **smaller than the AX102 target** (62 GB RAM, not 128 GB) and is
+> **shared with other workloads**. Both matter for capacity planning under §8.7.
+
+### 2.1 Pre-flight on a shared host — check this FIRST
+
+The compose stack binds 80 and 443 through Caddy. On a box that already serves
+other sites, that is a hard conflict, and you will not discover it until the very
+last step of the deploy unless you check up front:
+
+```bash
+ss -tlnp | grep -E ':(80|443)\s'         # anything here blocks Caddy
+docker ps --format '{{.Names}}\t{{.Ports}}' | grep -E '(:80|:443)->'
+```
+
+Resolve the conflict **before** running `generate-secrets.sh`, because freeing
+the ports means taking someone else's ingress down and that is a decision, not a
+deployment step. Options, in order of preference:
+
+1. **This stack owns the edge.** Stop and remove the other proxy. Only correct if
+   the vhosts it serves are genuinely decommissioned — confirm each one.
+2. **The existing proxy stays the edge.** Do not run this stack's Caddy; add the
+   split rules from `infra/caddy/Caddyfile` to that proxy's config and point it
+   at `web:3000`. Preserves the other sites, but the ingest/UI split now lives in
+   a file this repo does not own — record where.
+
+Also confirm no *other* Langfuse is already on the box (`docker ps | grep langfuse`).
+A pre-existing v3 install will hold the same hostname and quietly answer your
+verification probes with the wrong version — check `/api/public/health` reports the
+version you just deployed, not merely `"status":"OK"`.
 
 ---
 
@@ -159,8 +192,14 @@ the allowlist in `infra/.env` and `docker compose up -d --force-recreate caddy`.
 
 ## 3. First bring-up
 
+> Run every script with `bash scripts/<name>.sh`. A fresh clone does not
+> necessarily carry the executable bit, and `./scripts/...` then fails with
+> `Permission denied` (exit 126) — which looks like the script is broken rather
+> than merely not `+x`. Fix once with `chmod +x scripts/*.sh`.
+
 ```bash
 git clone <this-repo> && cd LangfuseMonitoring
+chmod +x scripts/*.sh
 
 # 1. Generate secrets. Refuses to overwrite an existing .env.
 ./scripts/generate-secrets.sh
@@ -210,9 +249,17 @@ docker compose exec clickhouse clickhouse-client \
 ./scripts/health-check.sh https://<domain>
 
 # Ingestion, end to end. This is the one that matters.
+# Needs a project first — headless init creates the org and admin user, but NOT
+# a project, so there are no API keys until you provision one:
+./scripts/provision-project.sh <slug> 90
 export LANGFUSE_PUBLIC_KEY=pk-lf-... LANGFUSE_SECRET_KEY=sk-lf-...
 ./scripts/ingestion-canary.sh https://<domain>
 ```
+
+> **The canary writes over OTLP, not `/api/public/ingestion`.** Langfuse v4
+> defaults to `LANGFUSE_MIGRATION_V4_WRITE_MODE=events_only`, under which the
+> legacy ingestion endpoint rejects trace events and the v3 read endpoints are
+> gone. See §5 issue 12 before "fixing" a canary failure.
 
 > If system tables were created before the config mount took effect, they keep the
 > old engine. Drop them and restart — ClickHouse recreates them with the configured
@@ -274,6 +321,175 @@ key revocation. Tracked in Stage 1C.
 
 ---
 
+## 5A. Failures hit during the first real server deploy (2026-08-10)
+
+Stage 1A's nine pitfalls were found bringing the stack up **locally**. The six below
+were found bringing it up **on the Hetzner box**, and none of them can reproduce
+locally: four are properties of a shared, internet-facing host, and two only appear
+against a real domain. They continue the numbering in
+[`DEPLOYMENT-PITFALLS.md`](DEPLOYMENT-PITFALLS.md).
+
+The recurring theme is unchanged, and worth restating because it caught us again:
+**every one of these presented as a different problem than it was.** A correct
+deployment looked broken; a broken probe looked like a broken app; an accepted
+write looked like a working pipeline.
+
+| # | Issue | Symptom | Real cause |
+|---|---|---|---|
+| 10 | Ports 80/443 already bound | `bind: address already in use`, or Caddy silently absent | Another project's proxy owns the edge |
+| 11 | Next.js binds `$HOSTNAME` | web + worker `(unhealthy)`, Caddy never starts | Probe hits `127.0.0.1`; app bound only to the container IP |
+| 12 | v4 `events_only` write mode | Canary: `207` then read-back fails forever | Legacy ingest/read endpoints retired; OTLP is the path |
+| 13 | Invalid / misdirected hostname | ACME never issues | Underscore in hostname, or DNS points elsewhere |
+| 14 | `Not authorized` in the browser | Looks like a failed deploy | The allowlist working as designed |
+| 15 | `.env` edits appear to do nothing | Old value still in effect after `restart` | Env vars are fixed at container **creation** |
+
+### 10. Ports 80/443 were already taken
+
+The box already ran an unrelated Caddy serving four production vhosts **plus an
+older Langfuse v3**, which held the very hostname we were deploying to and answered
+`/api/public/health` with `{"status":"OK","version":"3.158.0"}`.
+
+That last detail is the dangerous one: a health probe against the target domain
+**passed before we deployed anything**. Always assert on the version, not just
+on `status: OK`.
+
+Detection and resolution are in §2.1. Freeing the ports is a decision about someone
+else's service — get it confirmed, never assume.
+
+### 11. Web and worker are unhealthy while serving perfectly
+
+**Symptom.** `web` and `worker` sit at `(unhealthy)` forever. Because Caddy declares
+`depends_on: {web: {condition: service_healthy}}`, Caddy stays in `Created` and
+**there is no ingress at all** — the site is simply down. Migrations, meanwhile,
+completed cleanly and the logs show `✓ Ready`.
+
+```
+wget: can't connect to remote host (127.0.0.1): Connection refused
+```
+
+**Root cause.** Next.js standalone binds to whatever `$HOSTNAME` says, and Docker
+sets `HOSTNAME` to the container ID. The server therefore binds **only** the
+container's eth0 address:
+
+```
+$ docker exec langfuse-web-1 netstat -ltn
+tcp  0  0 172.21.0.6:3000   0.0.0.0:*  LISTEN     # <- not 127.0.0.1, not 0.0.0.0
+$ docker exec langfuse-web-1 sh -c 'wget -qO- http://$(hostname -i):3000/api/public/ready'
+{"status":"OK","version":"4.6.0"}                 # <- the app is fine
+```
+
+This is pitfall #3's twin. #3 was the probe naming the wrong address; this is the
+**app binding the wrong address**. Same signature, opposite fix — and note the fix
+for #3 (`127.0.0.1` instead of `localhost`) is what *exposes* this one.
+
+**Fix.** `HOSTNAME: "0.0.0.0"` on `web` and `worker` in `compose.yaml`. Upstream
+Langfuse's own compose sets this. Do not "fix" it by pointing the healthcheck at
+the container IP — that address changes on every recreate.
+
+### 12. `events_only` mode retires the v3 ingestion and read APIs
+
+**Symptom.** The canary reports `queued trace ... (207)` and then never reads it
+back. Worker logs are clean, no queue backlog, no errors anywhere — and MinIO is
+empty. The pipeline looks healthy and stores nothing.
+
+**Root cause.** Langfuse v4.6 defaults to
+`LANGFUSE_MIGRATION_V4_WRITE_MODE=events_only`. Under it,
+`POST /api/public/ingestion` **returns HTTP 207 while rejecting the event in the
+body**:
+
+```json
+{"successes":[],"errors":[{"id":"...","status":400,
+ "message":"Event type not accepted",
+ "error":"Event type \"trace-create\" is not accepted by /api/public/ingestion
+          when LANGFUSE_MIGRATION_V4_WRITE_MODE is events_only.
+          This endpoint only accepts score and log events."}]}
+```
+
+The v3 read endpoints are gone too — `/api/public/traces`,
+`/api/public/traces/{id}` and `/api/public/observations` all return **404** with a
+deprecation payload naming the replacement.
+
+**Fix.** Write traces over **OTLP** (`POST /api/public/otel/v1/traces`) and read
+them back via **`GET /api/public/v2/observations?fromStartTime=&toStartTime=`**.
+`scripts/ingestion-canary.sh` now does exactly this, which has the side benefit of
+exercising the same path the agents use (CLAUDE.md §6.1) instead of a retired one.
+
+Under this mode the `traces` and `observations` ClickHouse tables stay empty by
+design; rows land in `events_core` / `events_full`. An empty `traces` table is
+**not** evidence of broken ingestion:
+
+```sql
+SELECT count() FROM events_core;   -- this is where the data is
+```
+
+> **Lesson: a 2xx is not a success. Assert on the response body.** The old canary
+> checked only `http_code == 207` and would have passed against a pipeline that
+> persisted nothing — the same blind spot §"Lessons for the test suite" already
+> recorded once.
+
+### 13. The hostname must be a legal hostname that points at this box
+
+The domain first supplied for this deploy was `sportnavi_langfuse.sportnavi.de`,
+which cannot work for two independent reasons:
+
+- **Underscores are illegal in hostnames** (RFC 1123). Let's Encrypt and ZeroSSL
+  both refuse to issue, so HTTPS is impossible no matter what DNS says.
+- Its `A` record pointed at `85.13.152.135` — unrelated shared hosting, not this
+  server.
+
+Verify both before touching `.env`; ACME failures at the end of a deploy are
+expensive to diagnose:
+
+```bash
+dig +short A "$LANGFUSE_DOMAIN"      # must equal this host's public IP
+curl -s -4 https://ifconfig.me       # this host's public IP
+```
+
+Hyphens only. The working name here is `sportnavi-langfuse.sportnavi.de`.
+
+### 14. `Not authorized` is success, not failure
+
+A browser hitting the domain gets a black page reading **`Not authorized`**. That
+is `infra/caddy/Caddyfile`'s deny-by-default handler doing its job: the UI is
+restricted to `ADMIN_ALLOWLIST`, and every address outside it — including your own
+laptop — gets a 403.
+
+Distinguish "denied" from "broken" with one command, not by guessing:
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' https://<domain>/                  # 403 = allowlist
+curl -s -o /dev/null -w '%{http_code}\n' https://<domain>/api/public/health # 200 = platform is up
+```
+
+Confirm from the edge's own view — this is the authoritative record of what Caddy
+decided, and it shows the real client IP:
+
+```bash
+docker compose exec caddy tail -20 /var/log/caddy/access.log
+```
+
+To grant access, add the CIDR to `ADMIN_ALLOWLIST` and recreate Caddy (see #15).
+Note that residential IPs are usually dynamic — expect to redo this.
+
+### 15. Editing `.env` needs `--force-recreate`, not `restart`
+
+Pitfall #9 covers bind-mounted *files*. Environment variables have the same trap
+for a different reason: they are baked into the container at **creation**.
+`docker compose restart caddy` reuses the existing container and silently keeps the
+old `ADMIN_ALLOWLIST`.
+
+```bash
+docker compose up -d --force-recreate caddy
+docker exec langfuse-caddy-1 sh -c 'echo $ADMIN_ALLOWLIST'   # verify it actually changed
+```
+
+**Related trap:** do not `source infra/.env` in a shell. `ADMIN_ALLOWLIST` is a
+space-separated list and `::1/128` parses as a command, giving
+`./.env: line 82: ::1/128: No such file or directory`. Compose parses the file
+correctly; bash does not. Use `docker compose exec` for values, or quote carefully.
+
+---
+
 ## 6. Rebuild from scratch
 
 ```bash
@@ -309,3 +525,89 @@ name auto-loads and would publish the web port on the server.
 
 The ingest/UI split therefore **cannot** be verified locally — it must be checked
 against the real host, from a non-allowlisted source, per §4.
+
+**Local validation will not catch issues 10–15.** Four of them are properties of a
+shared, internet-facing host and two require a real domain. Treat a clean local run
+as necessary, never sufficient.
+
+---
+
+## 8. Operating this deployment
+
+Everything below assumes `cd /root/LangfuseMonitoring/infra` on the Hetzner box.
+The compose project is named `langfuse`, so containers are `langfuse-<service>-1`
+and will not collide with other stacks on the host.
+
+### Daily commands
+
+```bash
+docker compose ps                       # 7 services; web+worker must read (healthy)
+docker compose logs -f web worker       # follow the app tiers
+docker compose logs caddy --tail 50     # TLS + routing decisions
+docker compose restart <svc>            # code/state bounce (does NOT reload .env)
+docker compose up -d --force-recreate <svc>   # required after any .env change
+```
+
+`minio-init` showing `Exited (0)` is correct — it is a one-shot bucket creator, not
+a long-running service.
+
+### Health, at three increasing depths
+
+```bash
+cd /root/LangfuseMonitoring
+
+# 1. Is the platform up?  (public, works from anywhere)
+bash scripts/health-check.sh https://sportnavi-langfuse.sportnavi.de
+
+# 2. Is the security split intact?  403 on UI + 200 on health = correct
+curl -s -o /dev/null -w '%{http_code}\n' https://sportnavi-langfuse.sportnavi.de/
+curl -s -o /dev/null -w '%{http_code}\n' https://sportnavi-langfuse.sportnavi.de/api/public/health
+
+# 3. Does ingestion actually store and return data?  THE check that matters.
+export LANGFUSE_PUBLIC_KEY=pk-lf-...  LANGFUSE_SECRET_KEY=sk-lf-...
+bash scripts/ingestion-canary.sh https://sportnavi-langfuse.sportnavi.de
+```
+
+Expect the canary to pass in **~3 s** on an idle stack. A climbing figure is the
+earliest warning of worker backlog — track it before it becomes an outage.
+
+### Granting someone UI access
+
+```bash
+cd infra
+sed -i 's|^ADMIN_ALLOWLIST=.*|ADMIN_ALLOWLIST=<existing list> <new-cidr>|' .env
+docker compose up -d --force-recreate caddy
+docker exec langfuse-caddy-1 sh -c 'echo $ADMIN_ALLOWLIST'   # confirm
+```
+
+Ingest and health endpoints are deliberately **not** gated by this list — adding a
+CIDR affects the UI/admin surface only.
+
+### Onboarding a new agent project
+
+```bash
+bash scripts/provision-project.sh <project-slug> 90
+```
+
+One key pair per project, never a shared credential. The script refuses to
+re-provision an existing slug, so rotation stays a deliberate act. Only one
+`LANGFUSE_INIT_PROJECT_*` block is active at a time — the script strips the
+previous one and recreates `web`, which is a brief restart of the UI.
+
+### Where the data actually is
+
+| Question | Command |
+|---|---|
+| Trace rows? | `SELECT count() FROM events_core` — **not** `traces`, see issue 12 |
+| Queue backed up? | `valkey-cli -a "$REDIS_AUTH" llen bull:otel-ingestion-queue:wait` |
+| Raw events landed? | `mc ls --recursive l/langfuse` inside the `minio` container |
+| Disk headroom? | `df -h /` and ClickHouse `system.parts` |
+
+### Reboot behaviour
+
+Every long-running service is `restart: unless-stopped` and Docker is
+`systemctl enable`d, so the stack returns on its own after a reboot. Compose's
+`depends_on` ordering is **not** replayed on daemon restart — Caddy may briefly
+start before web is ready, which is harmless because it resolves upstreams per
+request. Verified 2026-08-10: full `docker compose restart` → all services healthy
+in ~15 s, canary passing at 3 s.

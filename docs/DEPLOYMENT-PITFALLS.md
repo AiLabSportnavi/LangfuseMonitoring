@@ -27,6 +27,15 @@ slow to start. Diagnose to root cause; do not treat symptoms.
 | 8 | Stale image tag from the plan | `manifest unknown` on pull | Deploy fails |
 | 9 | Bind-mount edit does not restart service | Fix appears not to work | Wasted debugging time |
 
+> **Issues 10–15 were found during the first real server deploy** and live in
+> [`RUNBOOK-deploy.md` §5A](RUNBOOK-deploy.md#5a-failures-hit-during-the-first-real-server-deploy-2026-08-10):
+> ports 80/443 already bound · Next.js binding `$HOSTNAME` · v4 `events_only`
+> retiring the ingestion/read APIs · invalid hostname · the allowlist 403 read as
+> an outage · `.env` needing `--force-recreate`.
+>
+> They are kept beside the deploy sequence because that is where they bite. None of
+> them reproduce locally.
+
 ---
 
 ## 1. ClickHouse rejects `<engine>` mixed with `<partition_by>` / `<ttl>`
