@@ -1,0 +1,10 @@
+# Secrets — never commit
+infra/.env
+*.env.local
+*.pem
+*.key
+
+# Runtime
+node_modules/
+.DS_Store
+backups/

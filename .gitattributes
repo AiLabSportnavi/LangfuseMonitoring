@@ -1,2 +1,11 @@
-# Auto detect text files and perform LF normalization
-* text=auto
+# This repo is authored on Windows but every artifact runs on Linux.
+# CRLF line endings would break shell scripts ("bad interpreter: ...^M"),
+# Docker healthcheck commands, and the ClickHouse XML mount. Force LF.
+* text=auto eol=lf
+
+*.sh   text eol=lf
+*.yaml text eol=lf
+*.yml  text eol=lf
+*.xml  text eol=lf
+Caddyfile text eol=lf
+.env.example text eol=lf
