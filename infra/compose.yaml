@@ -133,7 +133,14 @@ services:
       TZ: UTC
     volumes:
       # Disk protection. Must be present before the first byte is ingested.
-      - ./clickhouse/config.d:/etc/clickhouse-server/config.d:ro
+      #
+      # Mount the FILE, never the directory. Mounting ./clickhouse/config.d over
+      # /etc/clickhouse-server/config.d hides the image's own
+      # docker_related_config.xml, which is what sets listen_host to 0.0.0.0.
+      # ClickHouse then binds localhost only: its healthcheck still passes (it
+      # probes from inside the container) while web and worker get connection
+      # refused on 9000 and every ClickHouse migration fails.
+      - ./clickhouse/config.d/langfuse-ttl.xml:/etc/clickhouse-server/config.d/langfuse-ttl.xml:ro
       - clickhouse_data:/var/lib/clickhouse
       - clickhouse_logs:/var/log/clickhouse-server
     ulimits:
