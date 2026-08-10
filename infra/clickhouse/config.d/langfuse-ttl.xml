@@ -1,0 +1,36 @@
+<?xml version="1.0"?>
+<!--
+  ClickHouse disk protection for a single-node Tier 1 deployment.
+
+  This must be mounted BEFORE the first byte is ingested. On one box, ClickHouse's
+  own system tables will consume the NVMe at default settings, and retrofitting
+  these TTLs means an outage.
+
+  This is distinct from Langfuse's 90-day TRACE retention. That governs customer
+  data; this governs ClickHouse's internal logging — a common and entirely
+  avoidable cause of disk exhaustion on single-node deployments.
+-->
+<clickhouse>
+    <!-- The query profiler samples stacks continuously. High overhead, and it is
+         the single largest contributor to trace_log growth. Off. -->
+    <profiles>
+        <default>
+            <query_profiler_real_time_period_ns>0</query_profiler_real_time_period_ns>
+            <query_profiler_cpu_time_period_ns>0</query_profiler_cpu_time_period_ns>
+        </default>
+    </profiles>
+
+    <trace_log>
+        <engine>ENGINE = MergeTree PARTITION BY toYYYYMM(event_date) ORDER BY (event_date, event_time) TTL event_date + INTERVAL 7 DAY</engine>
+    </trace_log>
+
+    <opentelemetry_span_log>
+        <engine>ENGINE = MergeTree PARTITION BY toYYYYMM(finish_date) ORDER BY (finish_date, finish_time_us) TTL finish_date + INTERVAL 7 DAY</engine>
+    </opentelemetry_span_log>
+
+    <!-- query_log is kept longer than the others: it is the table you actually need
+         when diagnosing slow UI queries or a ClickHouse-side ingestion stall. -->
+    <query_log>
+        <engine>ENGINE = MergeTree PARTITION BY toYYYYMM(event_date) ORDER BY (event_date, event_time) TTL event_date + INTERVAL 30 DAY</engine>
+    </query_log>
+</clickhouse>
