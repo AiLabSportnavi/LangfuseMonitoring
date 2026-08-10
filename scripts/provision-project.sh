@@ -54,7 +54,7 @@ EOF
 docker compose up -d --force-recreate web
 echo "waiting for web to become ready..."
 timeout 180 docker compose exec -T web sh -c \
-  'until wget -qO- http://localhost:3000/api/public/ready >/dev/null 2>&1; do sleep 2; done' \
+  'until wget -qO- http://127.0.0.1:3000/api/public/ready >/dev/null 2>&1; do sleep 2; done' \
   || { echo "ERROR: web did not become ready. Check: docker compose logs web"; exit 1; }
 
 cat <<EOF
