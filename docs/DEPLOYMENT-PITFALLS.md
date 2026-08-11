@@ -295,6 +295,38 @@ confirming rejection — remains required and is not replaceable by any config c
 
 ---
 
+## 11. `/api/auth/providers` still lists `credentials` after disabling password login
+
+**Symptom.** `AUTH_DISABLE_USERNAME_PASSWORD=true` is set and confirmed present inside
+the container (`docker exec langfuse-web-1 printenv | grep AUTH_`), yet
+`GET /api/auth/providers` still returns a `credentials` entry alongside `azure-ad`.
+Reads as "the flag did not work."
+
+**It did work.** The providers endpoint reflects NextAuth's registered provider list,
+not the enforcement decision. Attempting the login proves it:
+
+```bash
+CSRF=$(curl -s -c /tmp/j http://127.0.0.1:3000/api/auth/csrf | grep -oE '"csrfToken":"[^"]+' | cut -d'"' -f4)
+curl -s -b /tmp/j -X POST -d "csrfToken=$CSRF" \
+  --data-urlencode "email=$EMAIL" --data-urlencode "password=$PASSWORD" \
+  -d json=true -d redirect=false \
+  http://127.0.0.1:3000/api/auth/callback/credentials
+# -> {"url":".../api/auth/error?error=Sign%20in%20with%20email%20and%20password%20is%20disabled..."}
+curl -s -b /tmp/j http://127.0.0.1:3000/api/auth/session    # -> {}  (no session)
+```
+
+**Why it matters in both directions.** Someone verifying the cut-over by reading
+`/api/auth/providers` would conclude the control failed and roll back a change that was
+working. Worse, the same reasoning inverted — "the endpoint no longer lists it, so we are
+safe" — would be an equally unfounded conclusion from the same untrustworthy signal.
+
+> **Lesson: verify an auth control by attempting the authentication, not by reading a
+> config or capability endpoint.** The same class as issue 10 and as the
+> `rate_limit\|request_body` assertion: a proxy signal that correlates with the thing you
+> care about, right up until it doesn't.
+
+---
+
 ## Diagnostic checklist
 
 When a service will not start, in this order:

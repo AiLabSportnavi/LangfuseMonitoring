@@ -153,7 +153,23 @@ AUTH_DISABLE_USERNAME_PASSWORD=true
 docker compose up -d --force-recreate web
 ```
 
-Verify the password form is gone and SSO login still works.
+**Verify by attempting the login, not by reading `/api/auth/providers`.** That endpoint
+still lists `credentials` after the flag takes effect — it reflects NextAuth's registered
+providers, not enforcement. See [DEPLOYMENT-PITFALLS.md #11](DEPLOYMENT-PITFALLS.md).
+
+```bash
+CSRF=$(curl -s -c /tmp/j https://sportnavi-langfuse.sportnavi.de/api/auth/csrf \
+       | grep -oE '"csrfToken":"[^"]+' | cut -d'"' -f4)
+curl -s -b /tmp/j -X POST -d "csrfToken=$CSRF" \
+  --data-urlencode "email=platform@example.com" \
+  --data-urlencode "password=$LANGFUSE_INIT_USER_PASSWORD" \
+  -d json=true -d redirect=false \
+  https://sportnavi-langfuse.sportnavi.de/api/auth/callback/credentials
+# expect: error=Sign in with email and password is disabled for this instance.
+```
+
+Then confirm SSO login still works. This whole sequence was rehearsed locally against a
+throwaway stack before this document was written, and behaved exactly as above.
 
 ### 🚦 GATE C — human required, and NOT automatable
 
