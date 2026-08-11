@@ -98,11 +98,17 @@ services:
       # has been confirmed to hold OWNER on the org — otherwise this produces a
       # running platform with no administrator, recoverable only via Postgres.
       AUTH_DISABLE_USERNAME_PASSWORD: ${AUTH_DISABLE_USERNAME_PASSWORD:-false}
-      LANGFUSE_INIT_ORG_ID: ${LANGFUSE_INIT_ORG_ID}
-      LANGFUSE_INIT_ORG_NAME: ${LANGFUSE_INIT_ORG_NAME}
-      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_INIT_USER_EMAIL}
-      LANGFUSE_INIT_USER_NAME: ${LANGFUSE_INIT_USER_NAME}
-      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD}
+      # Headless bootstrap. These RE-CREATE the org and the seed user on every
+      # web start if they are absent — deleting either in the UI is undone by
+      # the next restart. Once a real (SSO) owner exists, blank them, or the
+      # password-login seed account keeps coming back after password login has
+      # been disabled. Defaulted so they can be cleared without compose warning
+      # about an unset variable.
+      LANGFUSE_INIT_ORG_ID: ${LANGFUSE_INIT_ORG_ID:-}
+      LANGFUSE_INIT_ORG_NAME: ${LANGFUSE_INIT_ORG_NAME:-}
+      LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_INIT_USER_EMAIL:-}
+      LANGFUSE_INIT_USER_NAME: ${LANGFUSE_INIT_USER_NAME:-}
+      LANGFUSE_INIT_USER_PASSWORD: ${LANGFUSE_INIT_USER_PASSWORD:-}
       # Set per-project by scripts/provision-project.sh.
       LANGFUSE_INIT_PROJECT_ID: ${LANGFUSE_INIT_PROJECT_ID:-}
       LANGFUSE_INIT_PROJECT_NAME: ${LANGFUSE_INIT_PROJECT_NAME:-}
