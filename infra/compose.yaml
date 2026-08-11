@@ -65,6 +65,29 @@ services:
       <<: *langfuse-env
       NEXTAUTH_URL: ${NEXTAUTH_URL}
       NEXTAUTH_SECRET: ${NEXTAUTH_SECRET}
+
+      # ─── SSO: Microsoft Entra ID ──────────────────────────────────────────
+      # Auth is served by web only — the worker has no auth surface — so these
+      # are deliberately NOT in the shared x-langfuse-env anchor.
+      #
+      # The domain lock is NOT an env var. It is the app registration's
+      # "supported account types" = single tenant. A multi-tenant registration
+      # with these exact values set correctly still admits every Microsoft
+      # account on the internet. See the migration plan, Step 1.
+      #
+      # Empty defaults keep this inert: with no client ID, Langfuse does not
+      # register the provider and password login continues to work.
+      AUTH_AZURE_AD_CLIENT_ID: ${AUTH_AZURE_AD_CLIENT_ID:-}
+      # Must be the client secret VALUE, not the Secret ID. They sit next to
+      # each other in the portal and both look like GUIDs; the wrong one fails
+      # at login with an unhelpful error.
+      AUTH_AZURE_AD_CLIENT_SECRET: ${AUTH_AZURE_AD_CLIENT_SECRET:-}
+      AUTH_AZURE_AD_TENANT_ID: ${AUTH_AZURE_AD_TENANT_ID:-}
+
+      # Turns SSO into the ONLY way in. Do not enable until an Entra identity
+      # has been confirmed to hold OWNER on the org — otherwise this produces a
+      # running platform with no administrator, recoverable only via Postgres.
+      AUTH_DISABLE_USERNAME_PASSWORD: ${AUTH_DISABLE_USERNAME_PASSWORD:-false}
       LANGFUSE_INIT_ORG_ID: ${LANGFUSE_INIT_ORG_ID}
       LANGFUSE_INIT_ORG_NAME: ${LANGFUSE_INIT_ORG_NAME}
       LANGFUSE_INIT_USER_EMAIL: ${LANGFUSE_INIT_USER_EMAIL}
@@ -230,7 +253,14 @@ services:
 
   # The only service permitted to publish host ports.
   caddy:
-    image: caddy:2.11.4-alpine
+    # Custom build: stock Caddy has no rate_limit directive. See ./caddy/Dockerfile.
+    # `image:` names the built artifact so `docker compose pull` and rollback still
+    # work on a tag — to roll back, re-pin this to caddy:2.11.4-alpine and drop the
+    # rate_limit blocks from the Caddyfile, which must be done together.
+    build:
+      context: ./caddy
+      dockerfile: Dockerfile
+    image: langfuse-caddy:2.11.4-ratelimit-0.1.0
     depends_on:
       web: { condition: service_healthy }
     environment:

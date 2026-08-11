@@ -255,6 +255,46 @@ docker inspect <container> --format '{{.State.StartedAt}}'
 
 ---
 
+## 10. `AADSTS50194` cannot be used to detect a multi-tenant Entra app
+
+**Symptom.** A script probes `https://login.microsoftonline.com/common/oauth2/v2.0/authorize`
+for an app registration and treats the response as a tenancy test:
+`AADSTS50194` returned → single tenant; sign-in page served → multi-tenant.
+It reports **multi-tenant for an app the portal plainly shows as
+`Nur meine Organisation` (single tenant)**.
+
+**Root cause.** For the `/common` and `/organizations` authorities, Azure does not know
+which tenant the user belongs to until they enter an identity — home realm discovery
+happens *after* the sign-in page is served. `AADSTS50194` is therefore raised
+**post-authentication**, and an unauthenticated probe sees the sign-in page in both the
+single- and multi-tenant cases. The probe cannot distinguish them at all; it returns the
+same answer for every app and is indistinguishable from a real finding.
+
+**Fix.** The authoritative value is `signInAudience` in the app manifest, which is not
+publicly readable and must be supplied by the operator or read via Graph:
+
+| `signInAudience` | Who can sign in |
+|---|---|
+| `AzureADMyOrg` | this tenant only — **the only correct value here** |
+| `AzureADMultipleOrgs` | any work/school account, any tenant |
+| `AzureADandPersonalMicrosoftAccount` | the above, plus personal accounts |
+| `PersonalMicrosoftAccount` | personal accounts only |
+
+`scripts/test-entra-single-tenant.sh` now asserts the supplied value and separately
+checks what *is* reliably probeable unauthenticated — that the client id resolves and
+the redirect URI is registered (`AADSTS50011` fires pre-authentication, so that one is
+a valid test). The runtime proof — signing in with an out-of-tenant account and
+confirming rejection — remains required and is not replaceable by any config check.
+
+> **Lesson: run a known-good control before trusting a new test.** The bad method was
+> caught only because it was pointed at an app whose correct state was visible in a
+> screenshot. A test that returns the same verdict for every input is worthless, and
+> without a control it is indistinguishable from one that works. This nearly produced
+> the worst possible outcome — replacing an IP allowlist with an authentication check
+> believed to be verified and in fact never tested.
+
+---
+
 ## Diagnostic checklist
 
 When a service will not start, in this order:

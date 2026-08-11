@@ -1,5 +1,11 @@
 {
 	email {$ACME_EMAIL}
+
+	# rate_limit is a third-party module (see ./Dockerfile) and therefore has no
+	# position in Caddy's standard directive order. Stating it explicitly means the
+	# ordering is a property of this file rather than of the module's defaults.
+	# Before reverse_proxy: throttled requests must never reach the backend.
+	order rate_limit before reverse_proxy
 }
 
 # Caddy is the ONLY ingress. Nothing else publishes a host port, which is what
@@ -41,12 +47,37 @@
 			# observed 413s, and investigate why the batch is that large first.
 			max_size 10MB
 		}
+
+		# Size and rate are different controls: max_size bounds ONE request,
+		# this bounds the number of them. Deliberately loose — sized to stop a
+		# runaway agent loop, not to police normal traffic. Trace volume is still
+		# unmeasured (CLAUDE.md §19.1); a limit tuned on guesses would throttle
+		# legitimate deep traces. Tighten once real numbers exist.
+		#
+		# LIMITATION: keyed per source IP, which does NOT give per-project
+		# throttling. Vercel functions egress from many rotating IPs, so one
+		# project's flood spreads across keys and each stays under the limit.
+		# Per-project keying needs {header.Authorization} — that is the API
+		# secret, so it must never be combined with `log_key`. Deferred until
+		# the volume measurement, and tracked in docs/SECURITY-REVIEW.md.
+		rate_limit {
+			zone ingest {
+				key    {remote_host}
+				events 1000
+				window 1m
+			}
+		}
+
 		reverse_proxy web:3000
 	}
 
 	# ── PUBLIC: health, for off-host external monitoring ────────────────────
 	# Langfuse must not be the only system that knows Langfuse is down, so the
 	# external monitor must reach these without being on the allowlist.
+	#
+	# Deliberately NOT rate limited. The off-host monitor polls continuously, and
+	# throttling it would make a healthy platform report as down — manufacturing
+	# exactly the false signal CLAUDE.md §10.3 warns about.
 	@health path /api/public/health /api/public/ready
 	handle @health {
 		reverse_proxy web:3000
@@ -58,7 +89,35 @@
 	# private ranges would let a spoofed header bypass this allowlist.
 	@trusted remote_ip {$ADMIN_ALLOWLIST}
 	handle @trusted {
-		reverse_proxy web:3000
+		route {
+			# Brute-force protection for the auth surface. This is the
+			# precondition for removing ADMIN_ALLOWLIST: once the UI is reachable
+			# without network restriction, /api/auth/* is the exposed surface
+			# that matters most.
+			#
+			# It lives INSIDE this handler, scoped by `match`, rather than in its
+			# own `handle @auth` block earlier in the file. That is deliberate:
+			# handle blocks are mutually exclusive and evaluated in order, so a
+			# separate auth block would match before @trusted and make
+			# /api/auth/* publicly reachable immediately — exposing the login
+			# surface before the step-6 cut-over is ready for it.
+			#
+			# 30/min per IP: a browser SSO round trip makes several calls
+			# (providers, csrf, callback, session), so a tighter limit would
+			# break normal logins, while credential stuffing runs orders of
+			# magnitude above this.
+			rate_limit {
+				zone auth {
+					match {
+						path /api/auth/*
+					}
+					key    {remote_host}
+					events 30
+					window 1m
+				}
+			}
+			reverse_proxy web:3000
+		}
 	}
 
 	# Deny by default. This handler must never proxy — if it did, the entire
