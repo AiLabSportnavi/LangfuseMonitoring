@@ -83,6 +83,16 @@ services:
       # at login with an unhelpful error.
       AUTH_AZURE_AD_CLIENT_SECRET: ${AUTH_AZURE_AD_CLIENT_SECRET:-}
       AUTH_AZURE_AD_TENANT_ID: ${AUTH_AZURE_AD_TENANT_ID:-}
+      # Lets an Entra identity claim a pre-existing password account with the
+      # same address. Without it Auth.js refuses the merge and the login fails
+      # with OAuthAccountNotLinked — which is what every account created before
+      # SSO was switched on will hit, including the org OWNER.
+      #
+      # Safe ONLY because the app registration is single-tenant (AzureADMyOrg),
+      # so Entra is authoritative for the addresses it returns. On a
+      # multi-tenant app this would let anyone who can prove control of an
+      # address take over the matching Langfuse account.
+      AUTH_AZURE_AD_ALLOW_ACCOUNT_LINKING: ${AUTH_AZURE_AD_ALLOW_ACCOUNT_LINKING:-false}
 
       # Turns SSO into the ONLY way in. Do not enable until an Entra identity
       # has been confirmed to hold OWNER on the org — otherwise this produces a
