@@ -104,6 +104,9 @@ Ask the operator for the client secret. Add to `infra/.env`:
 AUTH_AZURE_AD_CLIENT_ID=03f90999-0120-4dcb-8728-171d6466406d
 AUTH_AZURE_AD_CLIENT_SECRET=<from the operator>
 AUTH_AZURE_AD_TENANT_ID=8238d906-9211-4059-89e2-36142daa7205
+# Required on this deployment: every account predates SSO. Without it the very
+# first SSO login fails with OAuthAccountNotLinked. See pitfall 13.
+AUTH_AZURE_AD_ALLOW_ACCOUNT_LINKING=true
 ```
 
 **Leave `AUTH_DISABLE_USERNAME_PASSWORD=false`.** Step 4 turns it on, and not before.
@@ -114,16 +117,41 @@ docker compose logs -f web --tail 60      # watch for the azure-ad provider regi
 bash ../scripts/ingestion-canary.sh https://sportnavi-langfuse.sportnavi.de
 ```
 
+**Verify the variables actually reached the container** — `web` enumerates its
+environment explicitly in `compose.yaml`, so anything present only in `.env` is dropped
+silently and `--force-recreate` still reports success (pitfall 14):
+
+```bash
+docker inspect langfuse-web-1 --format '{{range .Config.Env}}{{println .}}{{end}}' \
+  | grep -E 'AUTH_AZURE_AD_(CLIENT_ID|ALLOW_ACCOUNT_LINKING)'
+```
+
+If a variable is missing, add it to the `web` `environment:` block in `compose.yaml`
+first. Editing `.env` alone will not fix it.
+
 `ADMIN_ALLOWLIST` is untouched here. If SSO is broken, nothing is lost.
 
 ### 🚦 GATE A — human required
 
 The operator must, from an allowlisted IP:
 
-1. See a **"Sign in with Microsoft"** button on the login page.
-2. Log in successfully with their `@sportnavi.de` account.
+1. See a **"Sign in with Microsoft"** button on the login page. On Langfuse v4.6.0 this
+   renders as **"Azure AD"** — the same provider, a different label.
+2. Log in successfully with their `@sportnavi.de` account. Note this is **not** the
+   address on the pre-existing password account, which is a personal one — the two
+   identities sit in different organisations and land on different dashboards.
 
-**You cannot verify this yourself.** Do not proceed until they confirm.
+**You cannot verify the login itself.** Once they confirm, the link is durably checkable
+in Postgres — a successful page load is not evidence, a row is:
+
+```bash
+docker compose exec -T postgres psql -U langfuse -d langfuse \
+  -c 'select u.email, a.provider, a.type from "Account" a join users u on u.id=a.user_id;'
+```
+
+Expect `azure-ad | oauth` against the `@sportnavi.de` address. An empty table means no
+SSO login has ever completed, whatever the operator saw. Note the table is `"Account"`
+(quoted, capitalised) — `accounts` does not exist.
 
 ---
 

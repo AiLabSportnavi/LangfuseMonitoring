@@ -41,6 +41,8 @@ slow to start. Diagnose to root cause; do not treat symptoms.
 | 10 | `AADSTS50194` as a multi-tenant signal | Wrong conclusion about the app | Misdiagnosis |
 | 11 | `/api/auth/providers` lists `credentials` | Looks like password login is live | Misdiagnosis |
 | 12 | Rotating `.env` does not rotate the Postgres password | Web crash-loops on `P1000` | **Platform down, ingest included** |
+| 13 | Pre-SSO accounts cannot be signed into via Entra | `OAuthAccountNotLinked` | No admin can use SSO |
+| 14 | A variable in `.env` never reaches the container | Setting silently has no effect | Any config change, silently |
 
 ---
 
@@ -427,6 +429,111 @@ catches this.
 
 ---
 
+## 13. Accounts that predate SSO cannot sign in with Entra
+
+**Symptom.** Entra authentication itself succeeds, then Langfuse bounces back to the login
+page with a `callbackUrl` that nests into itself and:
+
+```
+error=OAuthAccountNotLinked
+```
+
+Password login for the same deployment still works, which makes it look like an Entra
+misconfiguration. It is not — the provider is fine.
+
+**Root cause.** Auth.js refuses to attach an OAuth identity to an existing account with the
+same email address unless explicitly told to. Silently merging them is an account-takeover
+vector: anyone who could get an IdP to assert an address would inherit that account.
+
+So **every account created before SSO was switched on hits this** — which on a migrated
+deployment means all of them, including the org `OWNER`. The condition is visible in
+Postgres before anyone tries to log in:
+
+```bash
+docker compose exec -T postgres psql -U langfuse -d langfuse \
+  -c 'select u.email, a.provider from "Account" a right join users u on u.id=a.user_id;'
+```
+
+A `provider` column that is entirely null means no user has ever completed an SSO login,
+and the first one to try will fail. (The table is `"Account"`, quoted and capitalised;
+`accounts` does not exist.)
+
+**Fix.**
+
+```env
+AUTH_AZURE_AD_ALLOW_ACCOUNT_LINKING=true
+```
+
+then recreate `web` — **and confirm the variable actually arrived, per issue 14.**
+
+**Security condition — do not skip.** Linking is only safe when the IdP is authoritative for
+the addresses it returns. Here the app registration is `signInAudience=AzureADMyOrg`
+(single-tenant, verified by `scripts/test-entra-app.sh`), so only tenant identities can
+authenticate at all. On a **multi-tenant** app the same setting would let anyone who can
+prove control of a matching address take over the corresponding Langfuse account. The
+upstream docs carry the same warning.
+
+**Verifying it worked.** A dashboard that loads is not proof — password login produces the
+same result. The durable evidence is a row:
+
+```
+                email                | provider | type
+-------------------------------------+----------+-------
+ mohamed-naceur.mahmoud@sportnavi.de | azure-ad | oauth
+```
+
+**Expect a different dashboard.** The Entra identity and the old password account are
+usually *different* users in different organisations, with different projects. That is
+correct behaviour, not a second fault — but it surprises everyone once.
+
+---
+
+## 14. A variable added to `.env` never reaches the container
+
+**Symptom.** A setting is added to `infra/.env`, `web` is recreated with
+`--force-recreate`, compose reports success, the container comes up healthy — and the
+setting has no effect whatsoever. No error, no warning, nothing in the logs.
+
+**Root cause.** The `web` and `worker` services **enumerate their environment explicitly**
+in `compose.yaml`:
+
+```yaml
+    environment:
+      AUTH_AZURE_AD_CLIENT_ID: ${AUTH_AZURE_AD_CLIENT_ID:-}
+```
+
+Only listed keys are passed through. `.env` is the *source* of values for that
+substitution, not the environment itself — so a key present in `.env` but absent from the
+`environment:` block is silently discarded. `env_file:` would behave differently; this
+project does not use it for the app tier, deliberately, because the explicit list is what
+keeps datastore credentials out of the app containers.
+
+This bit during the SSO migration: `AUTH_AZURE_AD_ALLOW_ACCOUNT_LINKING` was set correctly
+in `.env`, `web` was recreated twice, and the login kept failing with the exact error the
+setting exists to fix.
+
+**Fix.** Add the key to the service's `environment:` block in `compose.yaml`, then
+recreate. Because `compose.yaml` is tracked in git and `.env` is not, this also means the
+*shape* of the config is reviewable while the secrets stay out of the repo.
+
+**Detection.** `scripts/check-env-mapping.sh` lists every key in `.env` that no service
+consumes. It is static — two files, nothing running — so it belongs in CI and pre-deploy
+validation, where it catches the mistake before a deploy rather than after a failed login.
+
+**And always verify against the container, never against the file:**
+
+```bash
+docker inspect langfuse-web-1 --format '{{range .Config.Env}}{{println .}}{{end}}' \
+  | grep '<VARIABLE>'
+```
+
+> Combined with issue 9 (bind-mount edits need a restart) and issue 12 (env vars fix at
+> container *create* time), the rule is: **after any config change, confirm the running
+> container holds the value you think it does.** Three separate outages in this project
+> have come from a config that was correct on disk and absent at runtime.
+
+---
+
 ## Diagnostic checklist
 
 When a service will not start, in this order:
@@ -446,6 +553,9 @@ When a service will not start, in this order:
    container and the one the datastore actually holds** — three values that are assumed
    equal and silently are not. Test over TCP from a second container, never over the
    in-container socket. See issue 12.
+8. **When a config change appears to have no effect, check the container before checking
+   your logic** — `docker inspect <c> --format '{{range .Config.Env}}{{println .}}{{end}}'`.
+   A value can be correct in `.env` and absent at runtime. See issue 14.
 
 ---
 
