@@ -29,8 +29,32 @@ checked=0
 # Curl from inside the Prometheus container: these endpoints are deliberately
 # unreachable from the host (no published ports), and reaching them the same way
 # Prometheus does is also what proves Prometheus CAN reach them.
+# Docker Engine 29 writes `search .` with `options ndots:0` into the
+# container's resolv.conf. busybox's resolver — which is what wget in the
+# Prometheus image uses — mishandles that combination and fails every bare
+# service name with "bad address", while Prometheus's own Go resolver
+# resolves them fine. The symptom is this script reporting FAIL for every
+# endpoint while `up` is 1 for all of them in Prometheus. Appending a
+# trailing dot makes the name fully qualified and skips the search list.
+# Hosts that already contain a dot (FQDNs, literal IPs) and localhost are
+# left alone.
+qualify() {
+  local url="$1" scheme rest hostport host port path
+  scheme="${url%%://*}"
+  rest="${url#*://}"
+  hostport="${rest%%/*}"
+  path="${rest#"$hostport"}"
+  host="${hostport%%:*}"
+  port="${hostport#"$host"}"
+  case "$host" in
+    localhost|*.*) ;;
+    *) host="${host}." ;;
+  esac
+  printf '%s://%s%s%s' "$scheme" "$host" "$port" "$path"
+}
+
 fetch() {
-  compose exec -T prometheus wget -qO- --timeout=10 "$1" 2>/dev/null || true
+  compose exec -T prometheus wget -qO- --timeout=10 "$(qualify "$1")" 2>/dev/null || true
 }
 
 # assert_metric <label> <url> <metric-name>...
@@ -49,7 +73,15 @@ assert_metric() {
     checked=$((checked + 1))
     # Anchored at line start so a metric name that is merely a SUBSTRING of
     # another does not count as present.
-    if ! printf '%s\n' "$body" | grep -qE "^${m}[ {]"; then
+    # Herestring, NOT `printf ... | grep -q`. grep -q exits on its first
+    # match and closes the pipe; printf then dies with SIGPIPE (141), and
+    # `set -o pipefail` reports the whole pipeline as FAILED even though
+    # the metric was found. Every early match in a body bigger than the
+    # 64K pipe buffer therefore read as "missing": node, cadvisor,
+    # clickhouse, postgres and caddy all failed, while redis (its match
+    # sits near the end of the body) and blackbox (11K, fits the buffer)
+    # passed. A herestring has no pipeline, so pipefail cannot fire.
+    if ! grep -qE "^${m}[ {]" <<< "$body"; then
       missing="${missing} ${m}"
     fi
   done

@@ -534,6 +534,125 @@ docker inspect langfuse-web-1 --format '{{range .Config.Env}}{{println .}}{{end}
 
 ---
 
+## 15. `printf ... | grep -q` under `set -o pipefail` reports a false negative
+
+**Symptom.** `verify-metric-sources.sh` reported five of seven exporters as
+`FAIL: <name> — missing: <every metric>`, while in the same run Prometheus reported
+`up=12 down=0` and every one of those metrics was queryable. The two contradicted each
+other in the same output.
+
+**What went wrong.** The check was:
+
+```bash
+if ! printf '%s\n' "$body" | grep -qE "^${m}[ {]"; then
+```
+
+`grep -q` exits the instant it matches and closes the read end of the pipe. `printf` is
+still writing, so it dies with SIGPIPE — exit 141. `set -o pipefail` (set at the top of
+the script) makes a pipeline return the rightmost non-zero status, so the pipeline
+reports **141 even though grep found the metric**. The `!` then reads that as "missing".
+
+**Why it looked selective — and therefore not like a bug.** The failure depends on
+whether `printf` finishes before grep exits:
+
+| Exporter | Body | Match position | Result |
+|---|---|---|---|
+| blackbox | 11 KB | anywhere | PASS — fits the 64K pipe buffer, printf never blocks |
+| redis | 93 KB | `redis_up`, near the end | PASS — grep reads almost everything first |
+| node | 134 KB | `node_cpu_*`, early | FAIL |
+| caddy | 94 KB | `caddy_http_*`, early | FAIL |
+| postgres | 293 KB | `pg_stat_*`, mid | FAIL |
+| clickhouse | 763 KB | `ClickHouseProfileEvents_*`, first | FAIL |
+| cadvisor | 7 MB | `container_cpu_*`, early | FAIL |
+
+A plausible-looking pattern ("the big exporters are broken") that has nothing to do with
+the exporters.
+
+**Fix.** Use a herestring — no pipeline, so pipefail cannot fire:
+
+```bash
+if ! grep -qE "^${m}[ {]" <<< "$body"; then
+```
+
+**Rule.** `cmd | grep -q` is unsafe under `set -o pipefail` whenever the producer writes
+more than the pipe buffer. Prefer a herestring, or `grep -c ... || true`. This is the
+silent-failure class §18.11 of `CLAUDE.md` calls out: the script exits non-zero, looks
+authoritative, and is wrong.
+
+---
+
+## 16. busybox `wget` cannot resolve Docker service names on Docker Engine 29
+
+**Symptom.** `verify-metric-sources.sh` reported
+`FAIL: <name> — endpoint returned nothing (http://node-exporter:9100/metrics)` for
+**every** endpoint, while Prometheus — scraping those exact URLs — had all 12 targets up.
+
+**What went wrong.** The script curls endpoints from inside the Prometheus container,
+which is correct in intent (it proves Prometheus can reach them). But Docker Engine 29
+writes this into the container's `/etc/resolv.conf`:
+
+```
+search .
+options edns0 trust-ad ndots:0
+```
+
+Prometheus's Go resolver handles that fine. busybox's resolver — which `wget` in
+`prom/prometheus` uses — does not, and fails every bare service name with
+`wget: bad address 'node-exporter:9100'`. Resolution by container IP worked; by name it
+did not.
+
+**Fix.** Make the name absolute with a trailing dot, which skips the search list
+entirely — `http://node-exporter.:9100/metrics`. The script now does this in a
+`qualify()` helper, leaving already-dotted names, literal IPs and `localhost` alone.
+
+**Rule.** When an in-container probe fails but Prometheus scrapes the same URL happily,
+suspect the *probe's* resolver, not the target. Confirm by hitting the container IP:
+if IP works and name does not, it is DNS in that image.
+
+---
+
+## 17. `python` does not exist on Ubuntu 24.04 — only `python3`
+
+**Symptom.** `test-monitoring-config.sh` reported
+`FAIL: grafana/dashboards/0N-*.json is not valid JSON` for all three dashboards, then
+immediately reported `PASS: 3 dashboards parse and reference the right datasource`.
+The files were valid; `python3 -m json.tool` accepted all three.
+
+**What went wrong.** The check ran `python -c "import json..." 2>/dev/null`. Ubuntu 24.04
+ships no bare `python` shim, so the command failed with "not found", stderr was
+discarded, and the `||` branch attributed the failure to the file.
+
+**Fix.** Resolve the interpreter once, preferring `python3`:
+`PY="$(command -v python3 || command -v python || true)"`. Applied in
+`test-monitoring-config.sh` and `test-clickhouse-ttl.sh`.
+
+**Rule.** Never call bare `python` in a script that runs on a modern distro, and do not
+send an interpreter's stderr to `/dev/null` in a branch that will blame the input file
+for the failure.
+
+---
+
+## 18. `--pull-check` verifies tags remotely but does not pull, so promtool silently skips
+
+**Symptom.** `test-monitoring-config.sh --pull-check` printed
+`SKIP: promtool (image not pulled) — run --pull-check or pull it first` — while running
+with `--pull-check`. The advice in the message was the flag already in use.
+
+**What went wrong.** `--pull-check` queries registry manifests to confirm the tags exist;
+it never runs `docker pull`. The promtool block gates on
+`docker image inspect prom/prometheus:v3.13.2`, which fails until the image is local.
+Net effect: **`prometheus.yml` was never actually validated**, and the run still ended in
+`PASS: monitoring configuration valid`.
+
+**Fix.** `docker pull prom/prometheus:v3.13.2` once, then re-run. promtool then validated
+the config cleanly.
+
+**Rule.** A `SKIP` on the *only* check that validates a file is a failure of the suite, not
+a neutral outcome — especially when the overall verdict is still `PASS`. Treat "skipped the
+important check" as red until the image is present.
+
+---
+
 ## Diagnostic checklist
 
 When a service will not start, in this order:
@@ -574,3 +693,17 @@ carrying into any future infrastructure work:
 
 Still open: neither the healthchecks nor `test-clickhouse-ttl.sh` verify cross-container
 reachability. Worth adding before Stage 1C builds alerting on top of these signals.
+
+Bringing the monitoring stack up added a fourth blind spot, and it is the worst kind:
+**the verification tooling itself reported failures that did not exist.** Issues 15-18 were
+all defects in the checkers, not in the thing checked, and three of them produced confident,
+specific, entirely wrong `FAIL` lines.
+
+- **Cross-check every verdict against a second, independent source before acting on it.**
+  Prometheus's own `up` series and `/api/v1/query` contradicted the script in every case,
+  and were right every time. Two disagreeing signals in one output is itself the finding.
+- **A checker that cannot distinguish "the thing is broken" from "I could not run the
+  check" will report the first when it means the second.** Issues 16, 17 and 18 are three
+  variants of exactly that.
+- **Suppressed stderr is where these hide.** `2>/dev/null` on the probe turned "python not
+  found", "bad address" and SIGPIPE into indistinguishable, silent falsehoods.

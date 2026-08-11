@@ -1,5 +1,8 @@
 # Secrets — never commit
 infra/.env
+# Timestamped .env backups taken before config changes hold the same
+# real secrets as .env itself. Without this a `git add -A` commits them.
+infra/.env.bak-*
 *.env.local
 .claude/settings.local.json
 *.pem

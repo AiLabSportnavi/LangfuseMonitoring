@@ -23,6 +23,12 @@ fail=0
 # DEPLOYMENT-PITFALLS.md #7 is the same family of Windows-toolchain surprise.
 host_path() { printf '%s/%s' "$(pwd -W 2>/dev/null || pwd)" "$1"; }
 
+# Ubuntu 24.04 and most modern distros ship `python3` with no bare `python`
+# shim, so a hardcoded `python` silently fails and every check that uses it
+# reports FAIL against files that are actually fine. Resolve once, prefer
+# python3, fall back to python for environments that only have that.
+PY="$(command -v python3 || command -v python || true)"
+
 # ── Compose parses and resolves every variable ────────────────────────────
 if ! docker compose -f compose.yaml -f compose.monitoring.yaml config >/dev/null 2>&1; then
   echo "FAIL: merged monitoring compose config is invalid"
@@ -152,7 +158,7 @@ dash_count=0
 for f in grafana/dashboards/*.json; do
   [ -e "$f" ] || continue
   dash_count=$((dash_count + 1))
-  python -c "import json,sys; json.load(open(sys.argv[1]))" "$f" 2>/dev/null \
+  "${PY:-python3}" -c "import json,sys; json.load(open(sys.argv[1]))" "$f" 2>/dev/null \
     || { echo "FAIL: $f is not valid JSON"; fail=1; continue; }
   # A dashboard whose datasource uid does not match the provisioned datasource
   # loads fine and shows "datasource not found" on every panel.
