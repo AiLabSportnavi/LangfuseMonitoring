@@ -36,6 +36,12 @@ slow to start. Diagnose to root cause; do not treat symptoms.
 > They are kept beside the deploy sequence because that is where they bite. None of
 > them reproduce locally.
 
+| # | Issue | Symptom | Blast radius |
+|---|---|---|---|
+| 10 | `AADSTS50194` as a multi-tenant signal | Wrong conclusion about the app | Misdiagnosis |
+| 11 | `/api/auth/providers` lists `credentials` | Looks like password login is live | Misdiagnosis |
+| 12 | Rotating `.env` does not rotate the Postgres password | Web crash-loops on `P1000` | **Platform down, ingest included** |
+
 ---
 
 ## 1. ClickHouse rejects `<engine>` mixed with `<partition_by>` / `<ttl>`
@@ -327,6 +333,100 @@ safe" — would be an equally unfounded conclusion from the same untrustworthy s
 
 ---
 
+## 12. Rotating secrets in `.env` does not rotate the Postgres password
+
+**Symptom.** `langfuse-web` crash-loops. Postgres, ClickHouse, Redis and MinIO all report
+`(healthy)`. The web log repeats:
+
+```
+Error: P1000: Authentication failed against database server,
+the provided database credentials for `langfuse` are not valid.
+```
+
+`caddy` sits in `Created` and never starts, so the UI *and* the public ingest path are both
+down — while `docker compose ps` shows five of six services healthy.
+
+**Root cause.** The `postgres` image applies `POSTGRES_PASSWORD` **only when it initialises
+an empty data directory**. On every subsequent start the value is ignored and the role keeps
+whatever password it was created with. So when `infra/.env` is regenerated against an
+existing `postgres_data` volume:
+
+| Service | Password source | Rotates on recreate? |
+|---|---|---|
+| Redis/Valkey | `--requirepass` on the command line | **Yes** |
+| MinIO | root creds re-read at start | **Yes** |
+| ClickHouse | init script + `users.d` | **Yes** |
+| **Postgres** | **only at volume init** | **No** |
+
+Postgres silently diverges from every other service. Nothing warns; the drift only surfaces
+the next time a container is recreated and picks up the new `.env`.
+
+**The misleading part.** Checking the password from inside the container *appears to confirm
+it is correct*:
+
+```bash
+docker compose exec -T -e PGPASSWORD="$POSTGRES_PASSWORD" postgres \
+  psql -U langfuse -d langfuse -c 'select 1'      # succeeds — proves nothing
+```
+
+That connects over the **Unix socket**, which `pg_hba.conf` grants under `trust`/`peer` —
+the password is never checked. The app connects over **TCP**, where `scram-sha-256` applies.
+Always test the way the application connects, from a second container:
+
+```bash
+docker run --rm --network langfuse_langfuse -e PGPASSWORD="$POSTGRES_PASSWORD" \
+  postgres:17-alpine psql -h postgres -U langfuse -d langfuse -tAc 'select 1'
+```
+
+**A second false signal:** a still-running container that was created *before* the rotation
+keeps working, because its old credentials are still the valid ones. Here `worker` held a
+different `DATABASE_URL` password than `.env` and was connecting to Postgres fine — which
+inverts the usual intuition. Comparing the password baked into each container against `.env`
+is what localises the drift:
+
+```bash
+docker inspect <container> --format '{{range .Config.Env}}{{println .}}{{end}}' \
+  | grep '^DATABASE_URL='
+```
+
+Fingerprint the values (`sha256sum | cut -c1-12`) rather than printing secrets.
+
+**Fix.** Bring the role in line with `.env` — non-destructive, no volume is touched:
+
+```bash
+docker compose -f infra/compose.yaml exec -T postgres \
+  psql -U langfuse -d langfuse -v ON_ERROR_STOP=1 \
+  -c "ALTER USER \"langfuse\" WITH PASSWORD '<POSTGRES_PASSWORD from .env>';"
+docker compose -f infra/compose.yaml up -d --force-recreate web worker
+```
+
+Recreate **every** container created before the rotation, not just the failing one — `worker`
+also held a stale `REDIS_AUTH`, which surfaced as a flood of
+`Stream isn't writeable and enableOfflineQueue options is false` and an `(unhealthy)` worker.
+That looked like a Redis fault; Redis was fine and had rotated correctly.
+
+> **Never `docker compose down -v` to "reset" this.** It destroys all trace history and every
+> project credential. The `ALTER USER` above is the correct fix and is reversible — the old
+> password stays valid until it runs.
+
+**Prevention.** `scripts/generate-secrets.sh` already refuses to overwrite an existing
+`infra/.env`, so it is not the route in — this drift arrives through a **hand edit** of a
+live `.env`, which nothing guards. Rotating a credential on a running deployment is a
+deliberate procedure per datastore, not a file rewrite: change `.env`, apply the change
+*inside* the datastore, then recreate every consumer.
+
+`scripts/check-credential-drift.sh` detects the condition before it becomes an outage. It
+compares `.env` against what each container has baked in and against what the datastores
+actually accept, probing Postgres over TCP from a separate container so the socket-`trust`
+false pass above cannot occur. Run it after any `.env` edit and as part of post-deploy
+verification.
+
+Note also that `caddy` gating on `web: service_healthy` means any web failure silently takes
+the public ingest path down with it — the ingest canary, not `docker compose ps`, is what
+catches this.
+
+---
+
 ## Diagnostic checklist
 
 When a service will not start, in this order:
@@ -342,6 +442,10 @@ When a service will not start, in this order:
    an exited container with `docker cp` — `--rm` destroys the evidence.
 5. **Confirm the image's own config still loads** — see issue 2.
 6. **Confirm you restarted it** — see issue 9.
+7. **On any auth error, compare the credential in `.env` against the one baked into the
+   container and the one the datastore actually holds** — three values that are assumed
+   equal and silently are not. Test over TCP from a second container, never over the
+   in-container socket. See issue 12.
 
 ---
 
