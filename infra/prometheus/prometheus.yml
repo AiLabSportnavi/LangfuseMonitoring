@@ -1,0 +1,247 @@
+# Prometheus scrape configuration for the Langfuse Tier 1 stack.
+#
+# Design principle, inherited from CLAUDE.md §7.5's tracing philosophy and applied
+# to metrics: HIGH SIGNAL, NOT MAXIMUM LOGGING. Ask of every series — does this
+# change a decision? Cardinality that answers no question costs disk, slows
+# queries, and buries the series that matter.
+#
+# The metric_relabel_configs blocks below are that principle enforced. They are
+# not premature optimisation: cAdvisor alone would otherwise contribute more
+# series than every other target combined.
+#
+# Reload without restarting (keeps the TSDB head block intact):
+#   docker compose -f compose.yaml -f compose.monitoring.yaml kill -s SIGHUP prometheus
+
+global:
+  # 15s is a deliberate choice, not a default. The scaling signal in
+  # OPERATIONS.md §3 is queue depth AND ITS DERIVATIVE — and a derivative
+  # computed over a coarse interval lags exactly when it matters, during a spike.
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  evaluation_interval: 15s
+
+  # Stamped on every series. Cheap now, and the thing you wish you had the first
+  # time metrics from two environments end up in one place.
+  external_labels:
+    platform: langfuse
+    tier: "1"
+
+# ── ALERTING IS DEFERRED ────────────────────────────────────────────────────
+# Left empty on purpose, not by omission. Alerting comes after a baseline exists
+# and the placeholder thresholds in OPERATIONS.md §2 have been calibrated against
+# real behaviour — alerting on numbers nobody has observed produces noise, and a
+# channel that has learned to ignore alerts is worse than no alerting at all
+# (CLAUDE.md §10.3).
+#
+# When that work starts, the rules go here and Alertmanager is added to
+# compose.monitoring.yaml.
+rule_files: []
+# alerting:
+#   alertmanagers:
+#     - static_configs:
+#         - targets: ["alertmanager:9093"]
+
+scrape_configs:
+  # ── Prometheus itself ─────────────────────────────────────────────────────
+  # Self-monitoring, and the source of the TSDB size panel. Monitoring that does
+  # not monitor itself is how you discover the scrape has been failing for a week.
+  - job_name: prometheus
+    scrape_interval: 60s
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # ── Host ──────────────────────────────────────────────────────────────────
+  # CPU, RAM, NVMe, network. The authoritative disk source: ClickHouse reports
+  # its own view of the disk, but the filesystem cannot be wrong about it.
+  - job_name: node
+    static_configs:
+      - targets: ["node-exporter:9100"]
+        labels:
+          instance: hetzner-tier1
+
+  # ── Containers ────────────────────────────────────────────────────────────
+  # Per-container CPU, memory, restarts, OOM kills. 30s because cAdvisor is the
+  # expensive one, and container resource usage does not turn on a dime.
+  - job_name: cadvisor
+    scrape_interval: 30s
+    static_configs:
+      - targets: ["cadvisor:8080"]
+    metric_relabel_configs:
+      # Keep only the families the dashboards actually use. cAdvisor exports
+      # several hundred series per container by default; this is roughly a
+      # tenth of that and covers every panel.
+      #
+      # ONE LINE, deliberately. A YAML folded scalar (`>-`) would join these with
+      # SPACES, and Prometheus fully anchors relabel regexes — the result matches
+      # nothing, drops every series, and leaves blank panels rather than an
+      # error. Exactly the silent-failure class CLAUDE.md §18.11 says to guard.
+      - source_labels: [__name__]
+        regex: "container_cpu_usage_seconds_total|container_cpu_cfs_throttled_seconds_total|container_memory_working_set_bytes|container_memory_usage_bytes|container_spec_memory_limit_bytes|container_oom_events_total|container_start_time_seconds|container_network_receive_bytes_total|container_network_transmit_bytes_total|container_fs_usage_bytes|container_last_seen|machine_memory_bytes|machine_cpu_cores"
+        action: keep
+      # cAdvisor emits a duplicate series with an empty `name` for the cgroup
+      # root of each container. Same numbers, twice the storage.
+      #
+      # Matched on __name__ AND name together, not on name alone: machine_* has
+      # no `name` label at all, so a bare empty-name drop would silently discard
+      # the host CPU/memory totals the container panels are normalised against.
+      - source_labels: [__name__, name]
+        regex: "container_.*;"
+        action: drop
+      # `id` is the full cgroup path — long, unique per container restart, and
+      # entirely redundant with `name`. Dropping it stops a container restart
+      # from orphaning a whole series set.
+      - regex: "id|image"
+        action: labeldrop
+
+  # ── Caddy: the request/load layer ─────────────────────────────────────────
+  # Langfuse exposes no Prometheus endpoint, so this is where request rate,
+  # latency and HTTP error rate come from — Caddy terminates every request.
+  #
+  # Labels available: host, handler, method, code. There is NO path label, so
+  # this cannot separate ingestion from UI traffic within one host. What it does
+  # give: total load, latency distribution, status classes, and (via
+  # handler="static_response") a count of requests the allowlist rejected.
+  #
+  # Ingestion THROUGHPUT comes from ClickHouse inserted rows instead — see that
+  # job below. Edge request counts cannot answer it: /api/public/ingestion
+  # returns 207 on enqueue, so a healthy-looking 207 rate is compatible with a
+  # completely backlogged pipeline persisting nothing.
+  #
+  # caddy:2020 is the dedicated metrics listener, NOT Caddy's admin API on 2019.
+  # See the comment in the Caddyfile — scraping the admin API would mean exposing
+  # an interface that can reconfigure the running proxy.
+  - job_name: caddy
+    static_configs:
+      - targets: ["caddy:2020"]
+    metric_relabel_configs:
+      # Caddy emits a bucketed histogram per handler per status. Useful. But it
+      # also emits per-path series for the admin API, which nothing reads.
+      - source_labels: [handler]
+        regex: "admin"
+        action: drop
+
+  # ── ClickHouse ────────────────────────────────────────────────────────────
+  # Native endpoint enabled by clickhouse/config.d/prometheus.xml. 30s: these
+  # are aggregate counters and async metrics that ClickHouse itself refreshes on
+  # a ~1s cadence at best.
+  #
+  # ClickHouse is the Tier 2 trigger (CLAUDE.md §8.7) and the component that
+  # cannot be scaled horizontally — sharding is unsupported, shard count stays 1.
+  # Its saturation is therefore the single most consequential thing on this box.
+  - job_name: clickhouse
+    scrape_interval: 30s
+    static_configs:
+      - targets: ["clickhouse:9363"]
+    metric_relabel_configs:
+      # ClickHouse exports ~2000 ProfileEvents counters. A dozen of them are
+      # actionable; the rest are engine internals. Keeping everything would make
+      # ClickHouse the largest contributor to our own TSDB — an irony worth
+      # avoiding on a box whose main risk is disk exhaustion.
+      #
+      # ONE LINE — see the note in the cadvisor job above. A folded scalar here
+      # would produce a regex full of spaces that matches nothing.
+      #
+      # Metric NAMES are the silent failure mode of this whole file: a renamed
+      # ClickHouse async metric yields an empty panel, not an error, and an empty
+      # panel reads as "healthy". scripts/verify-metric-sources.sh asserts these
+      # names exist against the live endpoint — run it after any ClickHouse
+      # version bump.
+      - source_labels: [__name__]
+        regex: "ClickHouseAsyncMetrics_(DiskUsed_default|DiskTotal_default|DiskAvailable_default|OSMemoryAvailable|MemoryResident|LoadAverage1|Uptime|TotalBytesOfMergeTreeTables|TotalRowsOfMergeTreeTables|TotalPartsOfMergeTreeTables|NumberOfDatabases|NumberOfTables|MaxPartCountForPartition|ReplicasMaxQueueSize)|ClickHouseMetrics_(Query|Merge|PartMutation|ReadonlyReplica|MemoryTracking|TCPConnection|HTTPConnection|DelayedInserts|BackgroundMergesAndMutationsPoolTask)|ClickHouseProfileEvents_(Query|SelectQuery|InsertQuery|FailedQuery|FailedInsertQuery|FailedSelectQuery|InsertedRows|InsertedBytes|SelectedRows|SelectedBytes|QueryTimeMicroseconds|MergedRows|SlowRead|ReadBackoff)|ClickHouseErrorMetric_.*"
+        action: keep
+
+  # ── Postgres ──────────────────────────────────────────────────────────────
+  # The crown jewel (CLAUDE.md §13). Connection saturation against
+  # max_connections is the headline: both web and worker pool against Postgres,
+  # and exhaustion presents as an application outage with a healthy database.
+  - job_name: postgres
+    scrape_interval: 30s
+    static_configs:
+      - targets: ["postgres-exporter:9187"]
+
+  # ── Redis / Valkey, and the worker queue ──────────────────────────────────
+  # Two distinct signals from one exporter:
+  #
+  #   redis_memory_used_bytes    → the 1GB/100k-events-per-min rule (§8.5)
+  #   redis_evicted_keys_total   → MUST STAY ZERO. Valkey runs noeviction
+  #                                because it holds the ingestion queue; an
+  #                                eviction is silent queue-data loss.
+  #   redis_key_size{key=...}    → BullMQ queue depth, the worker scaling input
+  #                                from §11.2. Its derivative is the growth rate
+  #                                that §3 of the runbook insists be read
+  #                                alongside depth.
+  #
+  # 15s here, not 30s, precisely because of that derivative.
+  - job_name: redis
+    static_configs:
+      - targets: ["redis-exporter:9121"]
+
+  # ── MinIO ─────────────────────────────────────────────────────────────────
+  # Blob storage holds raw ingestion events before the worker processes them
+  # into ClickHouse, so its capacity is on the ingestion path, not beside it.
+  # Native endpoint; requires MINIO_PROMETHEUS_AUTH_TYPE=public, set in
+  # compose.monitoring.yaml.
+  - job_name: minio
+    scrape_interval: 60s
+    metrics_path: /minio/v2/metrics/cluster
+    static_configs:
+      - targets: ["minio:9000"]
+
+  # ── Langfuse availability probes ──────────────────────────────────────────
+  # The only direct signal about Langfuse itself, since the application exports
+  # no metrics of its own.
+  #
+  # Targets are the same contract scripts/health-check.sh treats as
+  # authoritative:
+  #   /api/public/health?failIfDatabaseUnavailable=true  → deep check, hits the DB
+  #   /api/public/ready                                  → 500 after SIGTERM, so
+  #                                                        this going red during a
+  #                                                        deploy is CORRECT
+  #   worker :3030/api/health                            → the worker has no
+  #                                                        public route at all
+  #
+  # These probe the container network directly. A TLS or Caddy failure is
+  # therefore INVISIBLE here — that is the off-host monitor's job
+  # (OPERATIONS.md §5), and this stack does not replace it.
+  - job_name: langfuse-endpoints
+    scrape_interval: 30s
+    metrics_path: /probe
+    params:
+      module: [http_2xx]
+    static_configs:
+      - targets:
+          - "http://web:3000/api/public/health?failIfDatabaseUnavailable=true"
+          - "http://web:3000/api/public/ready"
+          - "http://worker:3030/api/health"
+    relabel_configs:
+      # The standard blackbox indirection: the scrape target becomes a query
+      # parameter, and the exporter becomes the address actually scraped.
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox-exporter:9115
+      # A short, readable label for dashboards and (later) alert text.
+      - source_labels: [__param_target]
+        regex: ".*/api/public/health.*"
+        target_label: probe
+        replacement: web-health-deep
+      - source_labels: [__param_target]
+        regex: ".*/api/public/ready.*"
+        target_label: probe
+        replacement: web-ready
+      - source_labels: [__param_target]
+        regex: ".*worker.*"
+        target_label: probe
+        replacement: worker-health
+
+  # ── Blackbox exporter's own health ────────────────────────────────────────
+  # Without this, a dead prober is indistinguishable from a healthy platform:
+  # probe_success simply stops being reported, and "no data" renders as blank,
+  # not red. This is the same class of silent failure CLAUDE.md §18.11 says to
+  # record most carefully.
+  - job_name: blackbox-exporter
+    scrape_interval: 60s
+    static_configs:
+      - targets: ["blackbox-exporter:9115"]

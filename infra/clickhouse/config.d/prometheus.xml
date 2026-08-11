@@ -1,0 +1,57 @@
+<?xml version="1.0"?>
+<!--
+  ClickHouse native Prometheus endpoint.
+
+  ClickHouse ships this built in but COMMENTED OUT in the stock config.xml, so it
+  does nothing until an overlay like this one enables it. No exporter sidecar is
+  needed or wanted — a third-party exporter would only re-read the same
+  system.metrics / system.events / system.asynchronous_metrics tables this serves
+  directly, and would add a process that can fail independently of ClickHouse.
+
+  ══════════════════════════════════════════════════════════════════════════════
+  MOUNT THIS AS A FILE, NEVER AS A DIRECTORY.
+
+  See DEPLOYMENT-PITFALLS.md #2. Mounting ./clickhouse/config.d over
+  /etc/clickhouse-server/config.d hides the image's own docker_related_config.xml,
+  which is what sets listen_host to 0.0.0.0. ClickHouse then binds localhost only:
+  its healthcheck still passes (it probes from inside the container) while web and
+  worker get connection refused on 9000, and every migration fails.
+
+  compose.yaml mounts each file individually for exactly this reason. Adding a
+  config file here means adding a corresponding line there.
+  ══════════════════════════════════════════════════════════════════════════════
+
+  Unlike langfuse-ttl.xml, this file needs no <engine>/<partition_by> gymnastics —
+  <prometheus> is a plain top-level element with no stock definition to merge with.
+
+  Port 9363 is ClickHouse's conventional Prometheus port. It is NOT published to
+  the host: compose.yaml gives ClickHouse no `ports:` key, so this is reachable
+  only from the Docker network. That matters — the endpoint is unauthenticated and
+  reveals query patterns and resource shape.
+-->
+<clickhouse>
+    <prometheus>
+        <endpoint>/metrics</endpoint>
+        <port>9363</port>
+
+        <!-- system.metrics — instantaneous gauges (concurrent queries, open
+             connections, memory tracked). Exported as ClickHouseMetrics_*. -->
+        <metrics>true</metrics>
+
+        <!-- system.events — monotonic counters (queries run, rows inserted,
+             failed queries). Exported as ClickHouseProfileEvents_*. This is what
+             makes ingestion write-rate visible. -->
+        <events>true</events>
+
+        <!-- system.asynchronous_metrics — periodically-refreshed values including
+             DiskUsed_default / DiskTotal_default. Needed for the disk and
+             days-until-full panels, which OPERATIONS.md §11 calls one of the two
+             highest-value tiles on the dashboard. -->
+        <asynchronous_metrics>true</asynchronous_metrics>
+
+        <!-- system.errors — error counts by code. Cheap, and the only place a
+             rising ClickHouse error rate shows up as a metric rather than as a
+             log line nobody is reading. -->
+        <errors>true</errors>
+    </prometheus>
+</clickhouse>

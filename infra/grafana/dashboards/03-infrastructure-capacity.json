@@ -1,0 +1,299 @@
+{
+  "uid": "langfuse-infra-capacity",
+  "title": "Langfuse — Infrastructure & Capacity",
+  "description": "The tier-decision dashboard. Exists to answer one question with data instead of intuition: is this Tier 1 box sufficient, or has a CLAUDE.md §8.7 trigger fired? Read it monthly, not during incidents.",
+  "tags": ["langfuse", "infrastructure", "capacity", "tier1"],
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": false,
+  "refresh": "1m",
+  "time": { "from": "now-7d", "to": "now" },
+  "templating": { "list": [] },
+  "annotations": { "list": [] },
+  "panels": [
+    {
+      "type": "text",
+      "id": 1,
+      "title": "Tier-upgrade triggers (CLAUDE.md §8.7)",
+      "gridPos": { "h": 5, "w": 24, "x": 0, "y": 0 },
+      "options": {
+        "mode": "markdown",
+        "content": "Move to Tier 2 when any of these is **observed** — not on intuition, and not because the agent count grew:\n\n- ClickHouse disk **> 60%** of capacity at steady state\n- Ingestion lag (worker queue depth) sustained above threshold — see the *Ingestion & Queues* dashboard\n- p95 UI query latency degrading past usability\n- Sustained CPU saturation on the ClickHouse node\n\nThe first Tier 2 move is **splitting ingest from the UI** (§8.5) — a topology change, cheaper than new hardware. ClickHouse **cannot** be scaled by sharding: Langfuse does not support multi-shard clusters, so shard count stays 1 and growth is vertical, by replicas, by retention, or by sampling (§8.3–8.4)."
+      }
+    },
+
+    {
+      "type": "row",
+      "id": 100,
+      "title": "CAPACITY — the numbers that decide the tier",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 },
+      "collapsed": false
+    },
+    {
+      "type": "timeseries",
+      "id": 10,
+      "title": "Disk used over time",
+      "description": "The shape matters more than the value. A straight line rising is normal growth; a step is a backfill; a sawtooth is retention deleting nightly, which is what a healthy 90-day policy looks like once it starts biting.",
+      "datasource": { "type": "prometheus", "uid": "langfuse-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "targets": [
+        { "refId": "A", "expr": "node_filesystem_size_bytes{mountpoint=\"/\",fstype!=\"tmpfs\"} - node_filesystem_avail_bytes{mountpoint=\"/\",fstype!=\"tmpfs\"}", "legendFormat": "used" },
+        { "refId": "B", "expr": "node_filesystem_size_bytes{mountpoint=\"/\",fstype!=\"tmpfs\"}", "legendFormat": "capacity" }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "bytes", "custom": { "fillOpacity": 10, "lineWidth": 2, "showPoints": "never" } },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "capacity" }, "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }, { "id": "custom.fillOpacity", "value": 0 }, { "id": "custom.lineStyle", "value": { "fill": "dash", "dash": [8, 8] } } ] }
+        ]
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["lastNotNull", "max"] }, "tooltip": { "mode": "multi", "sort": "desc" } }
+    },
+    {
+      "type": "timeseries",
+      "id": 11,
+      "title": "Disk growth (GB/day)",
+      "description": "OPERATIONS.md §2: alert when this exceeds 2x the 7-day trailing average. This is the input to every capacity forecast — and the number to quote when asking for a bigger box, because it converts directly into a date.",
+      "datasource": { "type": "prometheus", "uid": "langfuse-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "targets": [
+        { "refId": "A", "expr": "-deriv(node_filesystem_avail_bytes{mountpoint=\"/\",fstype!=\"tmpfs\"}[6h]) * 86400 / 1e9", "legendFormat": "GB/day (6h trend)" },
+        { "refId": "B", "expr": "-deriv(node_filesystem_avail_bytes{mountpoint=\"/\",fstype!=\"tmpfs\"}[7d]) * 86400 / 1e9", "legendFormat": "GB/day (7d trend)" }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "none", "custom": { "fillOpacity": 8, "lineWidth": 2, "showPoints": "never", "axisLabel": "GB/day" } },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "GB/day (7d trend)" }, "properties": [ { "id": "custom.lineWidth", "value": 3 } ] }
+        ]
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["lastNotNull", "mean"] }, "tooltip": { "mode": "multi", "sort": "desc" } }
+    },
+    {
+      "type": "timeseries",
+      "id": 12,
+      "title": "ClickHouse stored data & parts",
+      "description": "ClickHouse's own view of what it holds. Compare against total disk: a large gap means something OTHER than trace data is consuming the NVMe — most often ClickHouse's own system logs, which is exactly what clickhouse/config.d/langfuse-ttl.xml exists to bound.",
+      "datasource": { "type": "prometheus", "uid": "langfuse-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+      "targets": [
+        { "refId": "A", "expr": "ClickHouseAsyncMetrics_TotalBytesOfMergeTreeTables", "legendFormat": "MergeTree bytes" },
+        { "refId": "B", "expr": "ClickHouseAsyncMetrics_TotalPartsOfMergeTreeTables", "legendFormat": "parts" }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "bytes", "custom": { "fillOpacity": 10, "lineWidth": 2, "showPoints": "never" } },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "parts" }, "properties": [ { "id": "unit", "value": "short" }, { "id": "custom.axisPlacement", "value": "right" } ] }
+        ]
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["lastNotNull"] }, "tooltip": { "mode": "multi", "sort": "desc" } }
+    },
+    {
+      "type": "timeseries",
+      "id": 13,
+      "title": "Rows stored in ClickHouse",
+      "description": "Total rows across MergeTree tables. Divided by trace count this gives observations-per-trace — the 50-200+ figure in CLAUDE.md §4 that has never been validated against real data.",
+      "datasource": { "type": "prometheus", "uid": "langfuse-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+      "targets": [
+        { "refId": "A", "expr": "ClickHouseAsyncMetrics_TotalRowsOfMergeTreeTables", "legendFormat": "rows stored" }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "fillOpacity": 12, "lineWidth": 2, "showPoints": "never" } },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "single", "sort": "none" } }
+    },
+
+    {
+      "type": "row",
+      "id": 200,
+      "title": "HOST",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 22 },
+      "collapsed": false
+    },
+    {
+      "type": "timeseries",
+      "id": 20,
+      "title": "CPU by mode",
+      "description": "Broken down by mode rather than shown as one number, because the mode identifies the cause. High iowait means the NVMe is the constraint; high system means syscall or network pressure; high user is genuine compute. They lead to different decisions.",
+      "datasource": { "type": "prometheus", "uid": "langfuse-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 23 },
+      "targets": [
+        { "refId": "A", "expr": "100 * sum by (mode) (rate(node_cpu_seconds_total{mode!=\"idle\"}[$__rate_interval])) / on() group_left() count(count by (cpu) (node_cpu_seconds_total))", "legendFormat": "{{mode}}" }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "percent", "min": 0, "custom": { "fillOpacity": 20, "lineWidth": 1, "showPoints": "never", "stacking": { "mode": "normal" } } },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "showLegend": true, "calcs": ["mean", "max"] }, "tooltip": { "mode": "multi", "sort": "desc" } }
+    },
+    {
+      "type": "timeseries",
+      "id": 21,
+      "title": "Memory",
+      "description": "Available is the number that matters, not free — Linux uses spare RAM for page cache, and ClickHouse depends on that cache for query performance. Falling available memory on this box shows up as slower queries long before it shows up as an OOM.",
+      "datasource": { "type": "prometheus", "uid": "langfuse-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 23 },
+      "targets": [
+        { "refId": "A", "expr": "node_memory_MemTotal_bytes", "legendFormat": "total" },
+        { "refId": "B", "expr": "node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes", "legendFormat": "used (excl. cache)" },
+        { "refId": "C", "expr": "node_memory_MemAvailable_bytes", "legendFormat": "available" }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "bytes", "custom": { "fillOpacity": 8, "lineWidth": 2, "showPoints": "never" } },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "total" }, "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "text" } }, { "id": "custom.fillOpacity", "value": 0 }, { "id": "custom.lineStyle", "value": { "fill": "dash", "dash": [8, 8] } } ] }
+        ]
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "showLegend": true, "calcs": ["lastNotNull", "min"] }, "tooltip": { "mode": "multi", "sort": "desc" } }
+    },
+    {
+      "type": "timeseries",
+      "id": 22,
+      "title": "Disk I/O time (utilisation)",
+      "description": "Fraction of wall-clock the device spent busy. Sustained near 100% means the NVMe is the bottleneck, which on this box usually means ClickHouse merges — and merges competing with inserts is how a healthy-looking disk still produces a growing worker queue.",
+      "datasource": { "type": "prometheus", "uid": "langfuse-prometheus" },
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 31 },
+      "targets": [
+        { "refId": "A", "expr": "100 * rate(node_disk_io_time_seconds_total{device!~\"loop.*|dm-.*\"}[$__rate_interval])", "legendFormat": "{{device}}" }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "percent", "min": 0, "custom": { "fillOpacity": 10, "lineWidth": 2, "showPoints": "never" } },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } }
+    },
+    {
+      "type": "timeseries",
+      "id": 23,
+      "title": "Network throughput",
+      "description": "Inbound is telemetry arriving from Vercel. Correlating a bandwidth step against the rows-inserted panel is the cheapest way to spot a project that started sending far more than it used to.",
+      "datasource": { "type": "prometheus", "uid": "langfuse-prometheus" },
+      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 31 },
+      "targets": [
+        { "refId": "A", "expr": "sum(rate(node_network_receive_bytes_total{device!~\"lo|veth.*|docker.*|br-.*\"}[$__rate_interval]))", "legendFormat": "in" },
+        { "refId": "B", "expr": "-sum(rate(node_network_transmit_bytes_total{device!~\"lo|veth.*|docker.*|br-.*\"}[$__rate_interval]))", "legendFormat": "out" }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "Bps", "custom": { "fillOpacity": 15, "lineWidth": 1, "showPoints": "never" } },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } }
+    },
+    {
+      "type": "timeseries",
+      "id": 24,
+      "title": "Load average",
+      "description": "Compared against core count. Load above core count means processes are queueing for CPU. On a 16-core box, load1 sustained above 16 is saturation regardless of what the CPU percentage panel says.",
+      "datasource": { "type": "prometheus", "uid": "langfuse-prometheus" },
+      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 31 },
+      "targets": [
+        { "refId": "A", "expr": "node_load1", "legendFormat": "load1" },
+        { "refId": "B", "expr": "node_load15", "legendFormat": "load15" },
+        { "refId": "C", "expr": "count(count by (cpu) (node_cpu_seconds_total))", "legendFormat": "cores" }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "fillOpacity": 5, "lineWidth": 2, "showPoints": "never" } },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "cores" }, "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }, { "id": "custom.lineStyle", "value": { "fill": "dash", "dash": [8, 8] } } ] }
+        ]
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } }
+    },
+
+    {
+      "type": "row",
+      "id": 300,
+      "title": "PER-CONTAINER — which service is the pressure?",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 38 },
+      "collapsed": false
+    },
+    {
+      "type": "timeseries",
+      "id": 30,
+      "title": "CPU by container (cores)",
+      "description": "The panel that turns 'the box is busy' into 'this service is busy'. On this stack ClickHouse normally dominates; worker rising above it is the signal that ingestion, not query load, is the constraint.",
+      "datasource": { "type": "prometheus", "uid": "langfuse-prometheus" },
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 39 },
+      "targets": [
+        { "refId": "A", "expr": "topk(10, sum by (name) (rate(container_cpu_usage_seconds_total{name=~\".+\"}[$__rate_interval])))", "legendFormat": "{{name}}" }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "fillOpacity": 15, "lineWidth": 1, "showPoints": "never", "stacking": { "mode": "normal" }, "axisLabel": "cores" } },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "showLegend": true, "calcs": ["mean", "max"] }, "tooltip": { "mode": "multi", "sort": "desc" } }
+    },
+    {
+      "type": "timeseries",
+      "id": 31,
+      "title": "Memory by container",
+      "description": "Working set per container. The monitoring stack itself appears here — if Prometheus or cAdvisor ever shows up near the top, the observability is costing more than it is worth and the scrape config needs trimming.",
+      "datasource": { "type": "prometheus", "uid": "langfuse-prometheus" },
+      "gridPos": { "h": 9, "w": 12, "x": 12, "y": 39 },
+      "targets": [
+        { "refId": "A", "expr": "topk(10, sum by (name) (container_memory_working_set_bytes{name=~\".+\"}))", "legendFormat": "{{name}}" }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "bytes", "custom": { "fillOpacity": 15, "lineWidth": 1, "showPoints": "never", "stacking": { "mode": "normal" } } },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "showLegend": true, "calcs": ["lastNotNull", "max"] }, "tooltip": { "mode": "multi", "sort": "desc" } }
+    },
+    {
+      "type": "timeseries",
+      "id": 32,
+      "title": "OOM kills",
+      "description": "OPERATIONS.md §2 treats an OOM kill as CRITICAL regardless of memory percentage, because it means work was lost, not merely that memory was tight. Should be flat at zero forever; any step is worth a root-cause investigation.",
+      "datasource": { "type": "prometheus", "uid": "langfuse-prometheus" },
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 48 },
+      "targets": [
+        { "refId": "A", "expr": "sum by (name) (container_oom_events_total{name=~\".+\"})", "legendFormat": "{{name}}" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short", "min": 0,
+          "custom": { "fillOpacity": 30, "lineWidth": 2, "showPoints": "never" },
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "dark-red", "value": 1 } ] }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } }
+    },
+    {
+      "type": "timeseries",
+      "id": 33,
+      "title": "Container uptime",
+      "description": "Time since each container started. A sawtooth is a crashloop — OPERATIONS.md §2 puts the threshold at more than 3 restarts in 15 minutes. Note that a bind-mount config edit does NOT restart a service (DEPLOYMENT-PITFALLS.md #9), so a flat line after a config change means the change has not been applied.",
+      "datasource": { "type": "prometheus", "uid": "langfuse-prometheus" },
+      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 48 },
+      "targets": [
+        { "refId": "A", "expr": "time() - container_start_time_seconds{name=~\".+\"}", "legendFormat": "{{name}}" }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "s", "custom": { "fillOpacity": 0, "lineWidth": 2, "showPoints": "never" } },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["lastNotNull"] }, "tooltip": { "mode": "multi", "sort": "desc" } }
+    },
+    {
+      "type": "timeseries",
+      "id": 34,
+      "title": "Monitoring's own footprint",
+      "description": "Prometheus TSDB size and series count. The stack exists to warn about disk exhaustion and must never cause it — retention.size=10GB is the hard cap. A series count climbing without a corresponding change in the platform means cardinality is leaking, most likely from cAdvisor.",
+      "datasource": { "type": "prometheus", "uid": "langfuse-prometheus" },
+      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 48 },
+      "targets": [
+        { "refId": "A", "expr": "prometheus_tsdb_storage_blocks_bytes", "legendFormat": "TSDB bytes" },
+        { "refId": "B", "expr": "prometheus_tsdb_head_series", "legendFormat": "active series" }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "bytes", "custom": { "fillOpacity": 8, "lineWidth": 2, "showPoints": "never" } },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "active series" }, "properties": [ { "id": "unit", "value": "short" }, { "id": "custom.axisPlacement", "value": "right" } ] }
+        ]
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["lastNotNull"] }, "tooltip": { "mode": "multi", "sort": "desc" } }
+    }
+  ]
+}

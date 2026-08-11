@@ -418,7 +418,34 @@ response body.
 | `check-env-mapping.sh` | Finds `.env` keys that no service consumes (static; safe in CI). |
 | `generate-secrets.sh` | First-install secret generation. Refuses to overwrite. |
 | `provision-project.sh` | Creates a project with its own API key pair. |
-| `test-*.sh` | Config, TTL, proxy-split, provisioning and secret-hygiene assertions. |
+| `discover-queue-keys.sh` | Finds the real BullMQ key layout in Valkey and prints the `REDIS_QUEUE_KEY_PATTERNS` value. Queue depth is silently unmeasured without it. |
+| `verify-metric-sources.sh` | Asserts every metric the dashboards depend on is actually exported. Run after any image bump. |
+| `test-*.sh` | Config, TTL, proxy-split, provisioning, monitoring and secret-hygiene assertions. |
+
+### Monitoring
+
+Prometheus and Grafana, in a separate compose file that is merged explicitly:
+
+```bash
+docker compose -f compose.yaml -f compose.monitoring.yaml up -d
+```
+
+Grafana is served at `$GRAFANA_DOMAIN` behind the same `ADMIN_ALLOWLIST` as the Langfuse UI, plus
+its own login. Nothing else in the monitoring stack publishes a host port — Caddy stays the only
+ingress.
+
+**Langfuse exposes no Prometheus endpoint** ([discussion #1816](https://github.com/orgs/langfuse/discussions/1816)
+is still open), so its signals are derived: queue depth from BullMQ's Redis keys, ingestion
+throughput from ClickHouse inserted rows, availability from blackbox probes, request load from
+Caddy. Throughput is deliberately measured at ClickHouse rather than at the edge, because
+`/api/public/ingestion` returns `207` on *enqueue* — a healthy request rate is compatible with a
+backlogged pipeline storing nothing.
+
+Three provisioned dashboards: platform overview, ingestion & queues, infrastructure & capacity.
+**Alerting is not implemented yet** — the thresholds in `docs/OPERATIONS.md` §2 were written before
+anything was measured, so a baseline comes first.
+
+Details, blind spots and maintenance: [`docs/MONITORING.md`](docs/MONITORING.md).
 
 ### External monitoring
 
@@ -587,6 +614,7 @@ retention.
 |---|---|
 | [`CLAUDE.md`](CLAUDE.md) | Architecture, requirements, design decisions, roadmap |
 | [`docs/OPERATIONS.md`](docs/OPERATIONS.md) | Thresholds, alert matrix, dashboard spec |
+| [`docs/MONITORING.md`](docs/MONITORING.md) | The Prometheus/Grafana stack — metric sources, dashboards, and what it cannot see |
 | [`docs/RUNBOOK-deploy.md`](docs/RUNBOOK-deploy.md) | Step-by-step deployment procedure |
 | [`docs/RUNBOOK-onboarding.md`](docs/RUNBOOK-onboarding.md) | Adding a new agent project |
 | [`docs/DEPLOYMENT-PITFALLS.md`](docs/DEPLOYMENT-PITFALLS.md) | Infrastructure failures, diagnosed to root cause |

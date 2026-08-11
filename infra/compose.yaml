@@ -191,6 +191,9 @@ services:
       # probes from inside the container) while web and worker get connection
       # refused on 9000 and every ClickHouse migration fails.
       - ./clickhouse/config.d/langfuse-ttl.xml:/etc/clickhouse-server/config.d/langfuse-ttl.xml:ro
+      # Native Prometheus endpoint on :9363, not published to the host. Harmless
+      # when the monitoring stack is not running — nothing scrapes it.
+      - ./clickhouse/config.d/prometheus.xml:/etc/clickhouse-server/config.d/prometheus.xml:ro
       - clickhouse_data:/var/lib/clickhouse
       - clickhouse_logs:/var/log/clickhouse-server
     ulimits:
@@ -283,6 +286,13 @@ services:
       LANGFUSE_DOMAIN: ${LANGFUSE_DOMAIN}
       ACME_EMAIL: ${ACME_EMAIL}
       ADMIN_ALLOWLIST: ${ADMIN_ALLOWLIST}
+      # Consumed by the Grafana site block in the Caddyfile. Defaulted here AND
+      # in the Caddyfile so the stack still starts when the monitoring compose
+      # file is not merged in — see DEPLOYMENT-PITFALLS.md #14, where a variable
+      # absent from this list silently never reached the container.
+      # Defaulted to a concrete name rather than the empty string: an empty site
+      # address is a Caddyfile parse error, which would take ingest down.
+      GRAFANA_DOMAIN: ${GRAFANA_DOMAIN:-grafana.localhost}
       TZ: UTC
     ports:
       - "80:80"

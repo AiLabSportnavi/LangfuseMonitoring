@@ -57,6 +57,18 @@ These are **EE**, not open source. Confirm licensing before designing a dependen
 
 ## 2. Monitoring matrix
 
+> **Implemented.** Prometheus and Grafana collect everything below —
+> see [`MONITORING.md`](MONITORING.md) for the stack, the metric sources, and its blind spots.
+> **Alerting is not implemented yet**, deliberately: the thresholds in this section were written
+> before anything was measured, and alerting on unobserved numbers manufactures noise. Collect a
+> baseline, calibrate these numbers against it, then add rules.
+>
+> Two caveats worth carrying into every threshold below:
+> - Langfuse exposes **no Prometheus endpoint**, so its signals are derived — queue depth from
+>   BullMQ's Redis keys, throughput from ClickHouse inserted rows, availability from blackbox probes.
+> - Prometheus runs **on the box it monitors**. It cannot report that the box is down; it goes blank.
+>   The off-host monitor in §5 remains required.
+
 ### Langfuse Web
 
 | Metric | Warning | Critical |
@@ -301,6 +313,10 @@ One page answering "is the platform healthy?" within a minute:
 
 **Days Until Full** and **Last Successful Restore Test** are the two highest-value tiles — both are
 leading indicators, and both are routinely missing from observability dashboards.
+
+> **Built as `Langfuse — Platform Overview`** in Grafana, section for section. *Days Until Full* is
+> live. The **RESILIENCE** and **COST** rows are still empty: nothing yet produces backup,
+> restore-test or infrastructure-cost metrics. See [`MONITORING.md`](MONITORING.md) §11.
 
 ---
 

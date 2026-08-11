@@ -6,6 +6,45 @@
 	# ordering is a property of this file rather than of the module's defaults.
 	# Before reverse_proxy: throttled requests must never reach the backend.
 	order rate_limit before reverse_proxy
+
+	# Enables Prometheus instrumentation. Required before the `metrics` directive
+	# below does anything — the directive alone is silently inert without it.
+	#
+	# per_host adds a `host` label, separating traffic on the Langfuse domain from
+	# traffic on the Grafana domain. Two hosts is negligible cardinality.
+	#
+	# NOTE what this does NOT give you: Caddy's metrics carry no path label, so
+	# this cannot split /api/public/ingestion from the UI within one host. The
+	# available labels are host, handler, method and code — `handler` separates
+	# proxied requests from the 403s emitted by the deny-by-default block, which
+	# is useful (it makes blocked admin attempts visible) but it is not an
+	# ingest/UI split.
+	#
+	# Ingestion THROUGHPUT is therefore read from ClickHouse's inserted-rows
+	# counter instead, which measures what actually landed rather than what was
+	# accepted at the edge. That distinction matters here: ingestion returns 207
+	# on queue, so an edge request count can look perfectly healthy while nothing
+	# is being persisted (OPERATIONS.md §1).
+	metrics {
+		per_host
+	}
+}
+
+# ── Caddy's own metrics — INTERNAL ONLY ─────────────────────────────────────
+# Caddy serves /metrics from its admin API on localhost:2019 by default. Binding
+# that admin API to 0.0.0.0 so Prometheus could scrape it would also expose an
+# API that can RECONFIGURE THE RUNNING SERVER to every container on the network.
+# That is an unacceptable price for a metrics endpoint.
+#
+# So the metrics handler gets its own plain-HTTP listener instead, and the admin
+# API stays on localhost inside the container where it belongs.
+#
+# :2020 is not in compose.yaml's `ports:` list, so it is reachable only from the
+# Docker network — same posture as Postgres, ClickHouse and Valkey. Prometheus
+# scrapes it as caddy:2020. Do not publish it: caddy_http_* series expose request
+# paths and traffic shape.
+:2020 {
+	metrics /metrics
 }
 
 # Caddy is the ONLY ingress. Nothing else publishes a host port, which is what
@@ -62,7 +101,7 @@
 		# the volume measurement, and tracked in docs/SECURITY-REVIEW.md.
 		rate_limit {
 			zone ingest {
-				key    {remote_host}
+				key {remote_host}
 				events 1000
 				window 1m
 			}
@@ -111,7 +150,7 @@
 					match {
 						path /api/auth/*
 					}
-					key    {remote_host}
+					key {remote_host}
 					events 30
 					window 1m
 				}
@@ -122,6 +161,79 @@
 
 	# Deny by default. This handler must never proxy — if it did, the entire
 	# admin surface would be public.
+	handle {
+		respond "Not authorized" 403
+	}
+}
+
+# ── RESTRICTED: Grafana ─────────────────────────────────────────────────────
+# A separate site block, not a subpath on the Langfuse domain. That is deliberate.
+#
+# A /grafana subpath would have to be matched AHEAD of the Langfuse site's
+# deny-by-default `handle`, and handle blocks are mutually exclusive and evaluated
+# in order — the same hazard documented at length around the /api/auth/* rate
+# limiter above. Getting that order wrong exposes an admin surface. A separate
+# site block cannot make that mistake, and it also avoids Grafana's
+# serve_from_sub_path, which rewrites every asset URL and breaks subtly.
+#
+# Two independent controls, matching CLAUDE.md §12.1's treatment of admin
+# surfaces: the same ADMIN_ALLOWLIST that gates the Langfuse UI, AND Grafana's own
+# login. Neither alone is sufficient — the allowlist is coarse (an IP, not a
+# person) and Grafana's login is only as good as its password.
+#
+# REQUIRES a DNS A record for this name pointing at the box, or ACME cannot issue
+# a certificate and Caddy will retry the challenge indefinitely at startup.
+#
+# Grafana is NOT an ingestion dependency. If this block is wrong, dashboards break
+# and telemetry keeps flowing.
+# The default matters: an unset GRAFANA_DOMAIN would expand to an empty site
+# address and Caddy would refuse to parse the whole file — taking ingest down to
+# misconfigure a dashboard. `.localhost` is special-cased by Caddy to an internal
+# self-signed certificate, so the fallback never touches ACME and never fails a
+# challenge for a name that does not resolve.
+{$GRAFANA_DOMAIN:grafana.localhost} {
+	encode gzip
+
+	log {
+		output file /var/log/caddy/grafana-access.log {
+			roll_size 50MiB
+			roll_keep 7
+		}
+		format json
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "no-referrer"
+		-Server
+	}
+
+	# X-Frame-Options is deliberately NOT set to DENY here, unlike the Langfuse
+	# block. Grafana renders its own panels in iframes; DENY breaks them.
+	# SAMEORIGIN gives the clickjacking protection without the breakage.
+	header X-Frame-Options "SAMEORIGIN"
+
+	@trusted remote_ip {$ADMIN_ALLOWLIST}
+	handle @trusted {
+		route {
+			# Grafana's login is the exposed credential surface once the
+			# allowlist is eventually relaxed, exactly as /api/auth/* is for
+			# Langfuse. Same reasoning, same order of magnitude.
+			rate_limit {
+				zone grafana_login {
+					match {
+						path /login*
+					}
+					key {remote_host}
+					events 30
+					window 1m
+				}
+			}
+			reverse_proxy grafana:3000
+		}
+	}
+
 	handle {
 		respond "Not authorized" 403
 	}

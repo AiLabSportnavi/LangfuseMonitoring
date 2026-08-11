@@ -1,0 +1,214 @@
+{
+  "uid": "langfuse-ingestion-queues",
+  "title": "Langfuse — Ingestion & Queues",
+  "description": "The worker-scaling decision dashboard. Implements docs/OPERATIONS.md §3: queue depth and its derivative are read TOGETHER, because depth alone misleads in both directions.",
+  "tags": ["langfuse", "ingestion", "queues", "scaling"],
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": false,
+  "refresh": "30s",
+  "time": { "from": "now-12h", "to": "now" },
+  "templating": { "list": [] },
+  "annotations": { "list": [] },
+  "panels": [
+    {
+      "type": "text",
+      "id": 1,
+      "title": "How to read this dashboard",
+      "gridPos": { "h": 5, "w": 24, "x": 0, "y": 0 },
+      "options": {
+        "mode": "markdown",
+        "content": "**Depth alone is a poor signal — always read it with the growth rate** (`OPERATIONS.md` §3).\n\n| Depth | Growth | Action |\n|---|---|---|\n| High | negative (draining) | **No action.** Recovering from a spike. |\n| Low | positive, sustained | **Scale workers.** A throughput deficit is forming. |\n| High | positive | **Critical.** Scale now. |\n| High | positive *after* scaling | **Escalate.** Workers are not the bottleneck — check ClickHouse write latency, S3 throttling, Redis CPU. |\n\n**If the queue panels are empty, they are not healthy — they are misconfigured.** Langfuse exports no metrics; queue depth is read from BullMQ's own Redis keys, and the key prefix is not documented. Run `./scripts/discover-queue-keys.sh` and set `REDIS_QUEUE_KEY_PATTERNS` in `infra/.env`."
+      }
+    },
+
+    {
+      "type": "row",
+      "id": 100,
+      "title": "QUEUE — the worker scaling input",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 },
+      "collapsed": false
+    },
+    {
+      "type": "timeseries",
+      "id": 10,
+      "title": "Depth per queue (waiting jobs)",
+      "description": "One series per BullMQ queue. Langfuse runs 20+ queues; ingestion and trace-upsert are the ones that matter for throughput. A single queue growing while others are flat points at one processor, not at overall worker capacity.",
+      "datasource": { "type": "prometheus", "uid": "langfuse-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 6 },
+      "targets": [
+        { "refId": "A", "expr": "redis_key_size{key=~\".*:wait\"}", "legendFormat": "{{key}}" }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "fillOpacity": 10, "lineWidth": 2, "showPoints": "never" } },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "showLegend": true, "calcs": ["lastNotNull", "max"] }, "tooltip": { "mode": "multi", "sort": "desc" } }
+    },
+    {
+      "type": "timeseries",
+      "id": 11,
+      "title": "Growth rate per queue (jobs/sec)",
+      "description": "The derivative — the half of the decision people forget. Above zero and sustained for 10 minutes is a WARNING per OPERATIONS.md §2; sustained for 30 minutes AFTER scaling is CRITICAL and means the bottleneck is downstream, not the workers. Computed over 10m so a momentary burst does not read as a trend.",
+      "datasource": { "type": "prometheus", "uid": "langfuse-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 6 },
+      "targets": [
+        { "refId": "A", "expr": "deriv(redis_key_size{key=~\".*:wait\"}[10m])", "legendFormat": "{{key}}" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "fillOpacity": 10, "lineWidth": 2, "showPoints": "never", "thresholdsStyle": { "mode": "line" } },
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "transparent", "value": null }, { "color": "red", "value": 0 } ] }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "showLegend": true, "calcs": ["lastNotNull", "mean"] }, "tooltip": { "mode": "multi", "sort": "desc" } }
+    },
+    {
+      "type": "timeseries",
+      "id": 12,
+      "title": "Jobs by state (all queues)",
+      "description": "waiting / active / delayed / failed, summed. `active` tracks worker concurrency — flat active with growing wait means the workers are saturated, not idle. `delayed` rising is usually retry backoff, which points at a downstream failure rather than a capacity problem.",
+      "datasource": { "type": "prometheus", "uid": "langfuse-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 14 },
+      "targets": [
+        { "refId": "A", "expr": "sum(redis_key_size{key=~\".*:wait\"})", "legendFormat": "waiting" },
+        { "refId": "B", "expr": "sum(redis_key_size{key=~\".*:active\"})", "legendFormat": "active" },
+        { "refId": "C", "expr": "sum(redis_key_size{key=~\".*:delayed\"})", "legendFormat": "delayed" },
+        { "refId": "D", "expr": "sum(redis_key_size{key=~\".*:failed\"})", "legendFormat": "failed" }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "fillOpacity": 15, "lineWidth": 2, "showPoints": "never" } },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "failed" }, "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } } ] }
+        ]
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "showLegend": true, "calcs": ["lastNotNull", "max"] }, "tooltip": { "mode": "multi", "sort": "desc" } }
+    },
+    {
+      "type": "timeseries",
+      "id": 13,
+      "title": "Failed jobs per queue",
+      "description": "OPERATIONS.md §2: processing errors above 0.1% are a WARNING, above 1% CRITICAL. BullMQ retains failed jobs, so this is cumulative, not a rate — a step up means new failures, a flat line means old ones that were never cleared.",
+      "datasource": { "type": "prometheus", "uid": "langfuse-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 14 },
+      "targets": [
+        { "refId": "A", "expr": "redis_key_size{key=~\".*:failed\"} > 0", "legendFormat": "{{key}}" }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "fillOpacity": 20, "lineWidth": 2, "showPoints": "never" } },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "showLegend": true, "calcs": ["lastNotNull"] }, "tooltip": { "mode": "multi", "sort": "desc" } }
+    },
+
+    {
+      "type": "row",
+      "id": 200,
+      "title": "THROUGHPUT — what actually reached storage",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 22 },
+      "collapsed": false
+    },
+    {
+      "type": "timeseries",
+      "id": 20,
+      "title": "Rows & bytes inserted into ClickHouse",
+      "description": "The end of the ingestion path, and therefore the only honest throughput number. Everything upstream (Caddy 207s, queue enqueues, S3 writes) can look healthy while nothing lands here.\n\nThis panel is what finally answers CLAUDE.md §8.1: actual trace volume is UNMEASURED, and every sizing figure in §8 is provisional until this has a week of data behind it.",
+      "datasource": { "type": "prometheus", "uid": "langfuse-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 23 },
+      "targets": [
+        { "refId": "A", "expr": "rate(ClickHouseProfileEvents_InsertedRows[$__rate_interval])", "legendFormat": "rows/sec" },
+        { "refId": "B", "expr": "rate(ClickHouseProfileEvents_InsertedBytes[$__rate_interval])", "legendFormat": "bytes/sec" }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "fillOpacity": 10, "lineWidth": 2, "showPoints": "never" } },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "bytes/sec" }, "properties": [ { "id": "unit", "value": "Bps" }, { "id": "custom.axisPlacement", "value": "right" } ] }
+        ]
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["mean", "max"] }, "tooltip": { "mode": "multi", "sort": "desc" } }
+    },
+    {
+      "type": "timeseries",
+      "id": 21,
+      "title": "ClickHouse write pressure",
+      "description": "DelayedInserts is the metric to watch: ClickHouse throttles inserts when too many parts accumulate, which is the mechanism by which a write-saturated ClickHouse turns into a growing worker queue. Rising MaxPartCountForPartition is the leading indicator of the same thing.",
+      "datasource": { "type": "prometheus", "uid": "langfuse-prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 23 },
+      "targets": [
+        { "refId": "A", "expr": "ClickHouseMetrics_DelayedInserts", "legendFormat": "delayed inserts" },
+        { "refId": "B", "expr": "ClickHouseAsyncMetrics_MaxPartCountForPartition", "legendFormat": "max parts/partition" },
+        { "refId": "C", "expr": "ClickHouseMetrics_Merge", "legendFormat": "running merges" }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "fillOpacity": 8, "lineWidth": 2, "showPoints": "never" } },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "delayed inserts" }, "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } } ] }
+        ]
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["lastNotNull", "max"] }, "tooltip": { "mode": "multi", "sort": "desc" } }
+    },
+
+    {
+      "type": "row",
+      "id": 300,
+      "title": "EDGE & AVAILABILITY",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 31 },
+      "collapsed": false
+    },
+    {
+      "type": "timeseries",
+      "id": 30,
+      "title": "Requests / sec by handler",
+      "description": "handler=reverse_proxy is traffic that reached Langfuse. handler=static_response is the deny-by-default block rejecting requests that missed ADMIN_ALLOWLIST — a rising line there is someone probing the admin surface, which is worth knowing even though it is being correctly blocked.",
+      "datasource": { "type": "prometheus", "uid": "langfuse-prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 0, "y": 32 },
+      "targets": [
+        { "refId": "A", "expr": "sum by (handler) (rate(caddy_http_requests_total[$__rate_interval]))", "legendFormat": "{{handler}}" }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "reqps", "custom": { "fillOpacity": 15, "lineWidth": 2, "showPoints": "never" } },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["mean", "max"] }, "tooltip": { "mode": "multi", "sort": "desc" } }
+    },
+    {
+      "type": "timeseries",
+      "id": 31,
+      "title": "HTTP 5xx rate",
+      "description": "OPERATIONS.md §2: above 1% is a WARNING, above 5% CRITICAL. Shown as a fraction of all requests, not an absolute count, so it stays meaningful across traffic levels.",
+      "datasource": { "type": "prometheus", "uid": "langfuse-prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 8, "y": 32 },
+      "targets": [
+        { "refId": "A", "expr": "100 * sum(rate(caddy_http_requests_total{code=~\"5..\"}[$__rate_interval])) / clamp_min(sum(rate(caddy_http_requests_total[$__rate_interval])), 0.001)", "legendFormat": "5xx %" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent", "min": 0,
+          "custom": { "fillOpacity": 20, "lineWidth": 2, "showPoints": "never", "thresholdsStyle": { "mode": "dashed" } },
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "orange", "value": 1 }, { "color": "red", "value": 5 } ] }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "single", "sort": "none" } }
+    },
+    {
+      "type": "timeseries",
+      "id": 32,
+      "title": "Health probe duration",
+      "description": "How long the deep health check takes. It queries Postgres, so a rising line here is early warning of database pressure before connection saturation shows up. Probe timeout is 8s; anything approaching that will register as a failure, not as a slow success.",
+      "datasource": { "type": "prometheus", "uid": "langfuse-prometheus" },
+      "gridPos": { "h": 8, "w": 8, "x": 16, "y": 32 },
+      "targets": [
+        { "refId": "A", "expr": "probe_duration_seconds", "legendFormat": "{{probe}}" }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "s", "custom": { "fillOpacity": 8, "lineWidth": 2, "showPoints": "never" } },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["mean", "max"] }, "tooltip": { "mode": "multi", "sort": "desc" } }
+    }
+  ]
+}

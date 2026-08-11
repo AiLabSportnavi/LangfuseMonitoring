@@ -13,6 +13,10 @@ gen() { openssl rand -hex 32; }
 
 pg_pw=$(gen); ch_pw=$(gen); redis_pw=$(gen); minio_pw=$(gen)
 nextauth=$(gen); salt=$(gen); enc=$(gen); init_pw=$(gen)
+# Grafana's local admin. One of the two controls guarding the dashboards (the
+# other is ADMIN_ALLOWLIST), so it gets the same treatment as every other
+# credential here rather than a memorable password chosen at setup time.
+grafana_pw=$(gen)
 
 sed \
   -e "s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=${pg_pw}|" \
@@ -27,6 +31,7 @@ sed \
   -e "s|^SALT=.*|SALT=${salt}|" \
   -e "s|^ENCRYPTION_KEY=.*|ENCRYPTION_KEY=${enc}|" \
   -e "s|^LANGFUSE_INIT_USER_PASSWORD=.*|LANGFUSE_INIT_USER_PASSWORD=${init_pw}|" \
+  -e "s|^GRAFANA_ADMIN_PASSWORD=.*|GRAFANA_ADMIN_PASSWORD=${grafana_pw}|" \
   infra/.env.example > "$target"
 
 chmod 600 "$target"
@@ -43,3 +48,7 @@ fi
 
 echo "Generated $target (mode 600)."
 echo "Now set NEXTAUTH_URL, LANGFUSE_DOMAIN, ACME_EMAIL and ADMIN_ALLOWLIST to real values."
+echo
+echo "If you will run the monitoring stack, also set GRAFANA_DOMAIN (it needs its"
+echo "own DNS A record) and, once the worker has run, REDIS_QUEUE_KEY_PATTERNS from"
+echo "./scripts/discover-queue-keys.sh. See docs/MONITORING.md."

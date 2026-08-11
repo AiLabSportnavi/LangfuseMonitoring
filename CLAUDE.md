@@ -463,6 +463,20 @@ runbook-depth material belongs beside it, not inside it.)*
 Langfuse Web · Langfuse Worker · ClickHouse · PostgreSQL · Redis/Valkey · host/cluster.
 Full metric list and thresholds: [`docs/OPERATIONS.md §2`](docs/OPERATIONS.md).
 
+**Implemented** as Prometheus + Grafana in [`infra/compose.monitoring.yaml`](infra/compose.monitoring.yaml),
+merged explicitly alongside `compose.yaml`. Stack, metric sources and blind spots:
+[`docs/MONITORING.md`](docs/MONITORING.md). **Alerting is deliberately deferred** until a baseline
+exists — the thresholds in `OPERATIONS.md` §2 were written before anything was measured.
+
+> **Langfuse exposes no Prometheus endpoint** — verified, not assumed
+> ([discussion #1816](https://github.com/orgs/langfuse/discussions/1816) is open; the only built-in
+> queue-metrics publisher targets CloudWatch). Its signals are therefore *derived*: worker queue
+> depth from BullMQ's Redis keys, ingestion throughput from ClickHouse inserted rows, availability
+> from blackbox probes, request load from Caddy. Do not go looking for `/metrics` on web or worker.
+>
+> Throughput is read at ClickHouse rather than at the edge on purpose: `/api/public/ingestion`
+> returns **207 on enqueue**, so an edge request rate can look healthy while nothing is persisted.
+
 The two dominant risks, both slow-moving and both catchable well in advance:
 
 1. **ClickHouse disk exhaustion** → ingestion stops. Track GB/day and **projected days-until-full**,
@@ -676,8 +690,8 @@ Strictly ordered. **Do not skip ahead** — each step's value depends on the one
 
 | # | Capability | Why this order |
 |---|---|---|
-| 1 | Health monitoring + alerting | Without it, nothing else is observable |
-| 2 | Resource, queue, disk, DB, ingestion metrics | Thresholds require measurement first |
+| 1 | Health monitoring ✅ + alerting ⏸ | Without it, nothing else is observable. Monitoring built (`docs/MONITORING.md`); alerting deliberately deferred until a baseline exists |
+| 2 | Resource, queue, disk, DB, ingestion metrics ✅ | Thresholds require measurement first — this is what produces the measurements |
 | 3 | Automated backups | Protect data before optimising anything |
 | 4 | Restore testing | An untested backup is not a backup |
 | 5 | Update detection + staging deploys | Safe change flow |
@@ -816,8 +830,11 @@ Not yet started — Phase 1 implementation begins here.
 7. Confirm the message-history payload multiplier (§7.5) against measured data.
 8. **External health monitoring + ingestion canary** (automation priority 1) — off-host, alerting to
    a channel the team reads.
-9. **Metrics collection** for worker queue depth/growth and ClickHouse days-until-full (priority 2) —
-   this is what turns the placeholder thresholds in `docs/OPERATIONS.md` into calibrated ones.
+9. ~~**Metrics collection** for worker queue depth/growth and ClickHouse days-until-full (priority 2)~~
+   — ✅ **built** ([`docs/MONITORING.md`](docs/MONITORING.md)). Now **run it and collect 2–4 weeks of
+   baseline**, then calibrate the placeholder thresholds in `docs/OPERATIONS.md` §2 and add alerting.
+   Item 1 above (measure real trace volume and step depth) is answered by the *Rows persisted to
+   ClickHouse* panel — until it has data, everything in §8 remains provisional.
 10. Backups configured (priority 3) **and a restore tested** (priority 4).
 11. Provision per-project credentials via `LANGFUSE_INIT_*` / API — never a shared key.
 12. Roll out to remaining projects via the shared package.

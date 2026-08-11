@@ -1,0 +1,39 @@
+# Blackbox exporter modules for Langfuse endpoint probing.
+#
+# Only what is used. An unused module is a configuration surface that can rot
+# without anyone noticing it rotted.
+
+modules:
+  # The one module every langfuse-endpoints target uses.
+  #
+  # Probes web:3000 and worker:3030 on the CONTAINER NETWORK, not through Caddy.
+  # That is deliberate — it separates "the application is broken" from "the edge
+  # is broken" — but it means TLS, DNS and Caddy failures are invisible to this
+  # stack. Those are the off-host external monitor's job (OPERATIONS.md §5).
+  http_2xx:
+    prober: http
+    # Comfortably under prometheus.yml's 10s scrape_timeout. A probe that
+    # outlives its scrape produces a gap rather than a failure, which is the
+    # wrong signal: "slow" must show up as slow, not as missing.
+    timeout: 8s
+    http:
+      method: GET
+      valid_http_versions: ["HTTP/1.1", "HTTP/2.0"]
+
+      # ONLY 200. Not the usual 2xx range.
+      #
+      # This matters for /api/public/ready specifically, which returns 500 after
+      # SIGTERM so the proxy drains traffic on shutdown. That 500 is CORRECT
+      # behaviour during a deploy, and it must register as a failed probe —
+      # otherwise the one signal that shutdown drained properly is swallowed.
+      valid_status_codes: [200]
+
+      # No redirect following. Every target is a direct internal endpoint; a
+      # redirect appearing here means a routing change nobody intended, and
+      # quietly following it would hide that.
+      follow_redirects: false
+
+      # These are plain HTTP on the Docker network. Stated rather than left to
+      # the default so it cannot be misread as an oversight.
+      preferred_ip_protocol: ip4
+      ip_protocol_fallback: false

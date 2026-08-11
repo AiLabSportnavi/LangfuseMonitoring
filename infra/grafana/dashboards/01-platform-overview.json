@@ -1,0 +1,449 @@
+{
+  "uid": "langfuse-platform-overview",
+  "title": "Langfuse — Platform Overview",
+  "description": "Is the platform healthy? Answer within a minute. Section order deliberately mirrors docs/OPERATIONS.md §11 so the runbook and the dashboard cannot drift apart.",
+  "tags": ["langfuse", "platform", "tier1"],
+  "timezone": "utc",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": false,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": { "list": [] },
+  "annotations": { "list": [] },
+  "panels": [
+    {
+      "type": "row",
+      "id": 100,
+      "title": "PLATFORM — is it up?",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 0 },
+      "collapsed": false
+    },
+    {
+      "type": "stat",
+      "id": 1,
+      "title": "Web — deep health",
+      "description": "GET /api/public/health?failIfDatabaseUnavailable=true. Fails if the web tier cannot reach Postgres. OPERATIONS.md §2: two consecutive failures is an EMERGENCY. Probed on the container network, so this stays green during a TLS or DNS outage — that is the off-host monitor's job.",
+      "datasource": { "type": "prometheus", "uid": "langfuse-prometheus" },
+      "gridPos": { "h": 4, "w": 4, "x": 0, "y": 1 },
+      "targets": [
+        { "refId": "A", "expr": "probe_success{probe=\"web-health-deep\"}", "instant": true }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value_and_name"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "DOWN", "color": "red", "index": 0 } } },
+            { "type": "value", "options": { "1": { "text": "UP", "color": "green", "index": 1 } } }
+          ],
+          "noValue": "NO DATA",
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "id": 2,
+      "title": "Web — ready",
+      "description": "GET /api/public/ready. Returns 500 after SIGTERM so the proxy drains traffic on shutdown — so this going red DURING A DEPLOY is correct behaviour, not an incident. Red while no deploy is running is an incident.",
+      "datasource": { "type": "prometheus", "uid": "langfuse-prometheus" },
+      "gridPos": { "h": 4, "w": 4, "x": 4, "y": 1 },
+      "targets": [
+        { "refId": "A", "expr": "probe_success{probe=\"web-ready\"}", "instant": true }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value_and_name"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "NOT READY", "color": "red", "index": 0 } } },
+            { "type": "value", "options": { "1": { "text": "READY", "color": "green", "index": 1 } } }
+          ],
+          "noValue": "NO DATA",
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "id": 3,
+      "title": "Worker — health",
+      "description": "worker:3030/api/health. The worker is the ingestion bottleneck (CLAUDE.md §11.2) and has no public route, so this internal probe is the only availability signal for it.",
+      "datasource": { "type": "prometheus", "uid": "langfuse-prometheus" },
+      "gridPos": { "h": 4, "w": 4, "x": 8, "y": 1 },
+      "targets": [
+        { "refId": "A", "expr": "probe_success{probe=\"worker-health\"}", "instant": true }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value_and_name"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            { "type": "value", "options": { "0": { "text": "DOWN", "color": "red", "index": 0 } } },
+            { "type": "value", "options": { "1": { "text": "UP", "color": "green", "index": 1 } } }
+          ],
+          "noValue": "NO DATA",
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 1 } ] }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "id": 4,
+      "title": "Scrape targets down",
+      "description": "Count of Prometheus targets currently failing to scrape. Non-zero means part of this dashboard is blind — and a blind panel renders as blank, not red. Check this before trusting anything else here.",
+      "datasource": { "type": "prometheus", "uid": "langfuse-prometheus" },
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 1 },
+      "targets": [
+        { "refId": "A", "expr": "count(up == 0) or vector(0)", "instant": true }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 1 } ] },
+          "noValue": "?"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "id": 5,
+      "title": "Container restarts (1h)",
+      "description": "Containers whose start time changed in the last hour. OPERATIONS.md §2: any unplanned restart is a warning; more than 3 in 15 minutes is a crashloop and CRITICAL.",
+      "datasource": { "type": "prometheus", "uid": "langfuse-prometheus" },
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 1 },
+      "targets": [
+        { "refId": "A", "expr": "count(changes(container_start_time_seconds{name=~\".+\"}[1h]) > 0) or vector(0)", "instant": true }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "orange", "value": 1 }, { "color": "red", "value": 4 } ] },
+          "noValue": "0"
+        },
+        "overrides": []
+      }
+    },
+
+    {
+      "type": "row",
+      "id": 200,
+      "title": "INGESTION — is data actually landing?",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 5 },
+      "collapsed": false
+    },
+    {
+      "type": "timeseries",
+      "id": 10,
+      "title": "Rows persisted to ClickHouse / sec",
+      "description": "THE ingestion throughput signal. Deliberately not the edge request rate: /api/public/ingestion returns 207 on enqueue, so request counts stay healthy while a backlogged pipeline persists nothing (OPERATIONS.md §1). Rows landing in ClickHouse is what actually happened. This panel is also the answer to CLAUDE.md §8.1's open question — real trace volume is unmeasured until this has run for a week.",
+      "datasource": { "type": "prometheus", "uid": "langfuse-prometheus" },
+      "gridPos": { "h": 7, "w": 8, "x": 0, "y": 6 },
+      "targets": [
+        { "refId": "A", "expr": "rate(ClickHouseProfileEvents_InsertedRows[$__rate_interval])", "legendFormat": "rows/sec" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "rowsps",
+          "custom": { "fillOpacity": 12, "lineWidth": 2, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "multi", "sort": "desc" } }
+    },
+    {
+      "type": "timeseries",
+      "id": 11,
+      "title": "Worker queue depth",
+      "description": "BullMQ queue length read straight from Redis — Langfuse exports no metrics, but a waiting job IS a Redis list entry. This is the worker scaling input from CLAUDE.md §11.2. READ IT WITH the growth-rate panel beside it: depth alone misleads. A large DRAINING queue needs no action; a small GROWING one needs immediate action. If this panel is empty, the key pattern is wrong — run scripts/discover-queue-keys.sh.",
+      "datasource": { "type": "prometheus", "uid": "langfuse-prometheus" },
+      "gridPos": { "h": 7, "w": 8, "x": 8, "y": 6 },
+      "targets": [
+        { "refId": "A", "expr": "sum by (key) (redis_key_size{key=~\".*:wait\"})", "legendFormat": "{{key}}" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "fillOpacity": 12, "lineWidth": 2, "showPoints": "never", "stacking": { "mode": "normal" } }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "bottom", "showLegend": true, "calcs": ["lastNotNull", "max"] }, "tooltip": { "mode": "multi", "sort": "desc" } }
+    },
+    {
+      "type": "timeseries",
+      "id": 12,
+      "title": "Queue growth rate (jobs/sec)",
+      "description": "The derivative of queue depth, and the half of the scaling decision that people forget. OPERATIONS.md §3: sustained POSITIVE means a throughput deficit is forming — scale workers, whatever the absolute depth. NEGATIVE means the queue is draining and no action is needed, whatever the absolute depth. Still positive after scaling means workers are NOT the bottleneck: check ClickHouse write latency, S3 throttling, Redis CPU.",
+      "datasource": { "type": "prometheus", "uid": "langfuse-prometheus" },
+      "gridPos": { "h": 7, "w": 8, "x": 16, "y": 6 },
+      "targets": [
+        { "refId": "A", "expr": "sum(deriv(redis_key_size{key=~\".*:wait\"}[10m]))", "legendFormat": "net growth" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "fillOpacity": 20, "lineWidth": 2, "showPoints": "never", "gradientMode": "scheme", "thresholdsStyle": { "mode": "line" } },
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 0 } ] }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true }, "tooltip": { "mode": "single", "sort": "none" } }
+    },
+    {
+      "type": "timeseries",
+      "id": 13,
+      "title": "Edge requests / sec by status class",
+      "description": "From Caddy. Total load at the ingress. No path label exists, so ingest and UI cannot be separated here — but UI traffic is allowlist-gated and low volume, so on the Langfuse host this is dominated by agent telemetry. handler=static_response counts allowlist rejections.",
+      "datasource": { "type": "prometheus", "uid": "langfuse-prometheus" },
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 13 },
+      "targets": [
+        { "refId": "A", "expr": "sum by (code) (rate(caddy_http_requests_total[$__rate_interval]))", "legendFormat": "{{code}}" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": { "fillOpacity": 15, "lineWidth": 1, "showPoints": "never", "stacking": { "mode": "normal" } }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "showLegend": true, "calcs": ["mean", "max"] }, "tooltip": { "mode": "multi", "sort": "desc" } }
+    },
+    {
+      "type": "timeseries",
+      "id": 14,
+      "title": "Edge latency p50 / p95 / p99",
+      "description": "OPERATIONS.md §2 thresholds are relative, not absolute: WARNING at 2x baseline, CRITICAL at 5x. Establishing that baseline is the point of this dashboard's first few weeks — do not set a fixed number before then.",
+      "datasource": { "type": "prometheus", "uid": "langfuse-prometheus" },
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 13 },
+      "targets": [
+        { "refId": "A", "expr": "histogram_quantile(0.50, sum by (le) (rate(caddy_http_request_duration_seconds_bucket[$__rate_interval])))", "legendFormat": "p50" },
+        { "refId": "B", "expr": "histogram_quantile(0.95, sum by (le) (rate(caddy_http_request_duration_seconds_bucket[$__rate_interval])))", "legendFormat": "p95" },
+        { "refId": "C", "expr": "histogram_quantile(0.99, sum by (le) (rate(caddy_http_request_duration_seconds_bucket[$__rate_interval])))", "legendFormat": "p99" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "fillOpacity": 0, "lineWidth": 2, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "showLegend": true, "calcs": ["mean", "max"] }, "tooltip": { "mode": "multi", "sort": "desc" } }
+    },
+
+    {
+      "type": "row",
+      "id": 300,
+      "title": "WORKERS — the ingestion bottleneck",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 20 },
+      "collapsed": false
+    },
+    {
+      "type": "timeseries",
+      "id": 20,
+      "title": "Web & worker CPU (cores)",
+      "description": "OPERATIONS.md §2 for the worker: 50-70% is monitor, above 70% sustained makes it a scaling candidate. Note these are absolute cores, not a percentage of a limit — no CPU limits are set on this box, so the ceiling is the host's core count.",
+      "datasource": { "type": "prometheus", "uid": "langfuse-prometheus" },
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 21 },
+      "targets": [
+        { "refId": "A", "expr": "sum by (name) (rate(container_cpu_usage_seconds_total{name=~\"langfuse-(web|worker)-.*\"}[$__rate_interval]))", "legendFormat": "{{name}}" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": { "fillOpacity": 12, "lineWidth": 2, "showPoints": "never", "axisLabel": "cores" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "showLegend": true, "calcs": ["mean", "max"] }, "tooltip": { "mode": "multi", "sort": "desc" } }
+    },
+    {
+      "type": "timeseries",
+      "id": 21,
+      "title": "Web & worker memory (working set)",
+      "description": "Working set, not RSS — this is what the OOM killer actually considers. OPERATIONS.md §2: warning above 75%, critical above 90% or on an OOM kill.",
+      "datasource": { "type": "prometheus", "uid": "langfuse-prometheus" },
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 21 },
+      "targets": [
+        { "refId": "A", "expr": "sum by (name) (container_memory_working_set_bytes{name=~\"langfuse-(web|worker)-.*\"})", "legendFormat": "{{name}}" }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "custom": { "fillOpacity": 12, "lineWidth": 2, "showPoints": "never" }
+        },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "showLegend": true, "calcs": ["mean", "max"] }, "tooltip": { "mode": "multi", "sort": "desc" } }
+    },
+
+    {
+      "type": "row",
+      "id": 400,
+      "title": "DATA LAYER",
+      "gridPos": { "h": 1, "w": 24, "x": 0, "y": 28 },
+      "collapsed": false
+    },
+    {
+      "type": "gauge",
+      "id": 30,
+      "title": "Disk used (host NVMe)",
+      "description": "ClickHouse dominates this volume. OPERATIONS.md §2 bands: under 60% normal, 60-70% warning, 70-80% investigate, 80-90% CRITICAL, over 90% EMERGENCY — at which point ingestion stops. Read from the host filesystem, which cannot be wrong about free space.",
+      "datasource": { "type": "prometheus", "uid": "langfuse-prometheus" },
+      "gridPos": { "h": 6, "w": 5, "x": 0, "y": 29 },
+      "targets": [
+        { "refId": "A", "expr": "100 * (1 - (node_filesystem_avail_bytes{mountpoint=\"/\",fstype!=\"tmpfs\"} / node_filesystem_size_bytes{mountpoint=\"/\",fstype!=\"tmpfs\"}))", "instant": true, "legendFormat": "used %" }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "showThresholdLabels": false, "showThresholdMarkers": true },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent", "min": 0, "max": 100,
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "yellow", "value": 60 }, { "color": "orange", "value": 70 }, { "color": "red", "value": 80 }, { "color": "dark-red", "value": 90 } ] }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "id": 31,
+      "title": "Projected days until disk full",
+      "description": "OPERATIONS.md §11 calls this one of the two highest-value tiles on the whole dashboard, because it is a LEADING indicator. A disk at 45% tells you nothing; a disk at 45% filling at 3GB/day tells you the date. Thresholds: under 30 days WARNING, under 14 days CRITICAL. Extrapolated from the 24h trend, so it is noisy right after a backfill or a retention delete — a negative or huge value means the disk is shrinking or flat, not that it is fine forever.",
+      "datasource": { "type": "prometheus", "uid": "langfuse-prometheus" },
+      "gridPos": { "h": 6, "w": 5, "x": 5, "y": 29 },
+      "targets": [
+        { "refId": "A", "expr": "clamp_max(node_filesystem_avail_bytes{mountpoint=\"/\",fstype!=\"tmpfs\"} / clamp_min(-deriv(node_filesystem_avail_bytes{mountpoint=\"/\",fstype!=\"tmpfs\"}[24h]), 0.0001) / 86400, 9999)", "instant": true }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false },
+        "colorMode": "background", "graphMode": "none", "textMode": "value"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "d", "decimals": 0,
+          "mappings": [ { "type": "range", "options": { "from": 9000, "to": 99999, "result": { "text": "not filling", "color": "green", "index": 0 } } } ],
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "orange", "value": 14 }, { "color": "green", "value": 30 } ] },
+          "noValue": "no trend yet"
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "id": 32,
+      "title": "Postgres connections used",
+      "description": "OPERATIONS.md §2: alert above 80% of max_connections. Both web and worker pool against Postgres, and exhaustion presents as an application outage with a perfectly healthy database — one of the least obvious failure modes on this stack.",
+      "datasource": { "type": "prometheus", "uid": "langfuse-prometheus" },
+      "gridPos": { "h": 6, "w": 5, "x": 10, "y": 29 },
+      "targets": [
+        { "refId": "A", "expr": "100 * sum(pg_stat_activity_count) / max(pg_settings_max_connections)", "instant": true }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "colorMode": "background", "graphMode": "area", "textMode": "value" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent", "decimals": 1,
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "orange", "value": 70 }, { "color": "red", "value": 80 } ] }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "id": 33,
+      "title": "Redis evictions (must be 0)",
+      "description": "NOT a performance metric. Valkey runs --maxmemory-policy noeviction deliberately, because it holds the ingestion queue — so a non-zero eviction counter means queued events were silently discarded. Treat any value above zero as CRITICAL data loss, not as memory pressure.",
+      "datasource": { "type": "prometheus", "uid": "langfuse-prometheus" },
+      "gridPos": { "h": 6, "w": 4, "x": 15, "y": 29 },
+      "targets": [
+        { "refId": "A", "expr": "redis_evicted_keys_total", "instant": true }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "colorMode": "background", "graphMode": "none", "textMode": "value" },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "dark-red", "value": 1 } ] }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "type": "stat",
+      "id": 34,
+      "title": "Redis memory",
+      "description": "Sizing rule from CLAUDE.md §8.5: roughly 1GB per 100,000 events/minute. Even at the aspirational ceiling this stays in single-digit GB — Redis is not the bottleneck on this platform, ClickHouse is. Watch it for the eviction risk, not for capacity.",
+      "datasource": { "type": "prometheus", "uid": "langfuse-prometheus" },
+      "gridPos": { "h": 6, "w": 5, "x": 19, "y": 29 },
+      "targets": [
+        { "refId": "A", "expr": "redis_memory_used_bytes", "instant": true }
+      ],
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "colorMode": "value", "graphMode": "area", "textMode": "value" },
+      "fieldConfig": {
+        "defaults": { "unit": "bytes", "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null } ] } },
+        "overrides": []
+      }
+    },
+    {
+      "type": "timeseries",
+      "id": 35,
+      "title": "ClickHouse — queries & failures / sec",
+      "description": "OPERATIONS.md §2: any sustained failed query is worth investigating. ClickHouse cannot be scaled horizontally — sharding is unsupported and shard count stays 1 (CLAUDE.md §8.3) — so its saturation is the most consequential thing on this box.",
+      "datasource": { "type": "prometheus", "uid": "langfuse-prometheus" },
+      "gridPos": { "h": 7, "w": 12, "x": 0, "y": 35 },
+      "targets": [
+        { "refId": "A", "expr": "rate(ClickHouseProfileEvents_Query[$__rate_interval])", "legendFormat": "queries" },
+        { "refId": "B", "expr": "rate(ClickHouseProfileEvents_InsertQuery[$__rate_interval])", "legendFormat": "inserts" },
+        { "refId": "C", "expr": "rate(ClickHouseProfileEvents_FailedQuery[$__rate_interval])", "legendFormat": "FAILED" }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "reqps", "custom": { "fillOpacity": 8, "lineWidth": 2, "showPoints": "never" } },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "FAILED" }, "properties": [ { "id": "color", "value": { "mode": "fixed", "fixedColor": "red" } }, { "id": "custom.lineWidth", "value": 3 } ] }
+        ]
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "showLegend": true, "calcs": ["mean", "max"] }, "tooltip": { "mode": "multi", "sort": "desc" } }
+    },
+    {
+      "type": "timeseries",
+      "id": 36,
+      "title": "ClickHouse & Postgres memory",
+      "description": "ClickHouse memory tracking against the host. OPERATIONS.md §2: ClickHouse warning above 85%. On a single box these two compete for the same 128GB with web, worker and the JVM-free rest of the stack.",
+      "datasource": { "type": "prometheus", "uid": "langfuse-prometheus" },
+      "gridPos": { "h": 7, "w": 12, "x": 12, "y": 35 },
+      "targets": [
+        { "refId": "A", "expr": "ClickHouseMetrics_MemoryTracking", "legendFormat": "clickhouse (tracked)" },
+        { "refId": "B", "expr": "sum by (name) (container_memory_working_set_bytes{name=~\"langfuse-(clickhouse|postgres|redis)-.*\"})", "legendFormat": "{{name}}" }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "bytes", "custom": { "fillOpacity": 8, "lineWidth": 2, "showPoints": "never" } },
+        "overrides": []
+      },
+      "options": { "legend": { "displayMode": "table", "placement": "right", "showLegend": true, "calcs": ["mean", "max"] }, "tooltip": { "mode": "multi", "sort": "desc" } }
+    }
+  ]
+}

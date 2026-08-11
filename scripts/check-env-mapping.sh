@@ -35,6 +35,17 @@ env_file="${2:-infra/.env}"
 [ -f "$compose_file" ] || { echo "ERROR: $compose_file not found"; exit 1; }
 [ -f "$env_file" ]     || { echo "ERROR: $env_file not found"; exit 1; }
 
+# Monitoring lives in a second compose file that is merged with -f rather than
+# edited into compose.yaml. Its variables (GRAFANA_ADMIN_PASSWORD,
+# REDIS_QUEUE_KEY_PATTERNS) are real and consumed — just not by compose.yaml —
+# so searching only the platform file would report them as dead keys and train
+# people to ignore this check. Included automatically when it exists and no
+# explicit compose file was passed.
+search_files=("$compose_file")
+if [ $# -eq 0 ] && [ -f "infra/compose.monitoring.yaml" ]; then
+  search_files+=("infra/compose.monitoring.yaml")
+fi
+
 # Keys that are deliberately not consumed by any service.
 #   COMPOSE_*        - read by the docker compose CLI itself, never by a service
 #   *_ALLOWLIST etc. - templated into config files rather than passed as env
@@ -44,17 +55,17 @@ orphans=()
 while IFS= read -r key; do
   [[ "$key" =~ $ignore_re ]] && continue
   # Referenced as ${KEY}, ${KEY:-default}, or bare $KEY anywhere in the compose file.
-  if ! grep -qE "\\\$\{${key}(:?[-?][^}]*)?\}|\\\$${key}\b" "$compose_file"; then
+  if ! grep -qE "\\\$\{${key}(:?[-?][^}]*)?\}|\\\$${key}\b" "${search_files[@]}"; then
     orphans+=("$key")
   fi
 done < <(grep -oE '^[A-Za-z_][A-Za-z0-9_]*=' "$env_file" | tr -d '=' | sort -u)
 
 if [ ${#orphans[@]} -eq 0 ]; then
-  echo "PASS: every key in $env_file is consumed by $compose_file"
+  echo "PASS: every key in $env_file is consumed by ${search_files[*]}"
   exit 0
 fi
 
-echo "FAIL: ${#orphans[@]} key(s) in $env_file are never read by $compose_file."
+echo "FAIL: ${#orphans[@]} key(s) in $env_file are never read by ${search_files[*]}."
 echo "These have NO effect at runtime. Add them to the relevant service's"
 echo "'environment:' block, or delete them from $env_file:"
 printf '  %s\n' "${orphans[@]}"

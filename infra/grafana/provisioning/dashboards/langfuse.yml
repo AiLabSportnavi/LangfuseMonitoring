@@ -1,0 +1,27 @@
+# Dashboard provider, provisioned as code.
+#
+# Grafana loads every .json under the path below at startup and re-reads on the
+# interval. Dashboards therefore live in git, not in grafana_data — the same
+# reasoning as the datasource file beside this one.
+
+apiVersion: 1
+
+providers:
+  - name: langfuse
+    orgId: 1
+    folder: Langfuse
+    type: file
+    # Deleting a JSON file removes the dashboard. Without this, a dashboard
+    # removed from git lingers in Grafana forever and slowly diverges from what
+    # the repository says exists.
+    disableDeletion: false
+    # Edits made in the UI are discarded on the next reload. That is the point:
+    # a dashboard tweaked in the browser and never committed is lost on the next
+    # container replacement, and its absence is discovered during an incident.
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards
+      # Mirrors subdirectories into Grafana folders. Nothing uses this yet; it
+      # is what keeps the layout extensible as dashboards are added.
+      foldersFromFilesStructure: false

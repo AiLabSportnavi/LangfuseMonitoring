@@ -1,0 +1,29 @@
+# Grafana datasource, provisioned as code.
+#
+# CLAUDE.md §13: all infrastructure is defined as code and reproducible. A
+# datasource added through the UI lives only in grafana_data and is lost the
+# moment the container is replaced — which is exactly when you need dashboards
+# to work.
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    uid: langfuse-prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    # Grafana would otherwise refuse to reprovision an existing datasource,
+    # so a change to this file would appear to have no effect.
+    editable: false
+    jsonData:
+      # Must match prometheus.yml's global scrape_interval. Grafana uses it to
+      # pick a sane $__rate_interval, and getting it wrong makes rate() over
+      # short windows return gaps that look like an outage.
+      timeInterval: 15s
+      httpMethod: POST
+      # Enables the dashboards' use of PromQL features (predict_linear over
+      # subqueries, present_over_time) without Grafana silently degrading them.
+      prometheusType: Prometheus
+      prometheusVersion: 3.13.2
