@@ -1,0 +1,13 @@
+node_modules
+.env*
+# The template carries no secrets and must stay committed — it is the only
+# record of which variables this agent needs.
+!.env.example
+.eve
+.vercel
+.next
+.output
+.nitro
+dist
+.DS_Store
+*.tsbuildinfo

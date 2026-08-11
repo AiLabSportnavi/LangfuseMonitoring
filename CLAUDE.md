@@ -720,12 +720,35 @@ the Vercel AI SDK all move quickly; several facts in this document (ClickHouse s
 Eve's instrumentation hook, the OTLP header contract) are exactly the kind that change between
 releases.
 
+> ### ⚠️ We are working with the **Eve Vercel agent framework**
+>
+> The agent side of this platform is **Eve** (<https://vercel.com/eve>, docs <https://eve.dev>) —
+> *not* a hand-rolled Vercel AI SDK script, and not another agent framework. Instrumentation goes
+> through Eve's auto-discovered `agent/instrumentation.ts` hook. Do not substitute a plain AI SDK
+> integration for it.
+>
+> **The Vercel plugin, Context7, the Langfuse MCP server, the Langfuse skill, and Superpowers are all
+> installed, and you are expected to use them.** Do not answer Eve, Vercel, or Langfuse API questions
+> from memory — three separate APIs turned out to have changed while building the PoC (see
+> [`examples/eve-langfuse-poc/README.md`](examples/eve-langfuse-poc/README.md)).
+>
+> **Eve ships its full docs inside the installed package** — `node_modules/eve/docs/`, matching the
+> installed version exactly. Read those first; they outrank Context7, this file, and any web source.
+
 | Resource | Status | Use for |
 |---|---|---|
 | **Langfuse skill** | ✅ Installed at `.claude/skills/langfuse/` | Langfuse features, CLI, instrumentation, best practices. Use it rather than re-deriving. |
 | **Eve documentation** | ✅ <https://eve.dev/docs> | Instrumentation, execution model, deployment. Page index at `/llms.txt`. |
 | **Vercel plugin** | ✅ Available | Vercel projects, deployments, env vars, platform capabilities |
-| **Context7** | ✅ Installed (`context7@claude-plugins-official`, user scope) | Real-time library docs via `resolve-library-id` → `query-docs`. Useful IDs: `/websites/langfuse_self-hosting`, `/langfuse/langfuse-k8s`, `/langfuse/langfuse-docs`. |
+| **Context7 plugin** | ✅ Installed (`context7@claude-plugins-official`, user scope) | Real-time library docs via `resolve-library-id` → `query-docs`. Useful IDs: `/websites/langfuse_self-hosting`, `/langfuse/langfuse-k8s`, `/langfuse/langfuse-docs`. |
+| **Langfuse MCP server** | ✅ Installed, project scope — [`.mcp.json`](.mcp.json) | Direct access to *our* live Langfuse instance (`https://sportnavi-langfuse.sportnavi.de/api/public/mcp`). Use for querying real traces/prompts on the deployed platform, not for docs. |
+| **Superpowers skills** | ✅ Installed (user scope) | Process skills — `brainstorming` before creative work, `systematic-debugging` before fixing bugs, `test-driven-development`, `writing-plans`, `requesting-code-review`, `verification-before-completion`. Process skills come first, then implementation skills. |
+
+> **Two Langfuse surfaces, do not confuse them.** The **skill** (`.claude/skills/langfuse/`, pinned in
+> [`skills-lock.json`](skills-lock.json)) is documentation and CLI know-how. The **MCP server** talks to our
+> running instance. Docs question → skill. "What does trace X actually contain?" → MCP server or `langfuse-cli`.
+> The MCP server needs `LANGFUSE_MCP_AUTH` (base64 `pk:sk`) in the environment; if its tools are missing, that
+> variable is unset — see §12.3, never hardcode it into `.mcp.json`.
 
 > **Context7 session caveat:** the plugin spawns `npx -y @upstash/context7-mcp` (v4.0.0, verified working).
 > If its tools are absent from a session's tool list, the MCP server did not register at session start —
@@ -765,6 +788,17 @@ releases.
 9. Every automated action needs a reason, threshold, rollback path, and alert.
 10. **When documentation conflicts with this file, the current official documentation wins** — verify,
     then update this file to match.
+11. **Document every mistake, bug, and surprise — immediately, in the knowledge base.** Any
+    integration issue, configuration problem, or unexpected behaviour gets written up with **what went
+    wrong, why it happened, and how it was fixed**, plus the config/dependency/command detail needed
+    to avoid it again. Infrastructure issues go in [`docs/DEPLOYMENT-PITFALLS.md`](docs/DEPLOYMENT-PITFALLS.md);
+    agent/tracing integration issues go in [`docs/INTEGRATION-PITFALLS.md`](docs/INTEGRATION-PITFALLS.md).
+    If it could affect a future integration, add a troubleshooting note there rather than only fixing
+    the code. **These are living documents — keep them current as new issues are found.**
+
+    > Record the *silent* failures most carefully. In this project the majority of tracing bugs
+    > produced a working agent, a clean log, and wrong or missing data. Those cost the most time and
+    > are the least discoverable from the code alone.
 
 ---
 

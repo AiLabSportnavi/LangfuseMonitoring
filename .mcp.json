@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "langfuse": {
+      "type": "http",
+      "url": "https://sportnavi-langfuse.sportnavi.de/api/public/mcp",
+      "headers": {
+        "Authorization": "Basic ${LANGFUSE_MCP_AUTH}"
+      }
+    }
+  }
+}

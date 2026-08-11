@@ -1,6 +1,7 @@
 # Secrets — never commit
 infra/.env
 *.env.local
+.claude/settings.local.json
 *.pem
 *.key
 
