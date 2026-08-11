@@ -653,6 +653,59 @@ important check" as red until the image is present.
 
 ---
 
+## 19. A cleanup trap printed "reverted" and reverted nothing, leaving `.env` at the repo root
+
+**Symptom.** A temporary config change was applied to `infra/.env` behind a
+`trap revert EXIT` so it could not be left behind. The trap fired, printed its success
+line, and the change was still in place afterwards — along with a **complete copy of
+`infra/.env`, secrets and all, sitting at the repository root**, untracked and unignored.
+
+**What went wrong.** Two independent mistakes that only became visible together:
+
+```bash
+cd /root/LangfuseMonitoring/infra
+revert() {
+  cp -a /tmp/.env.restore .env                 # relative path
+  docker compose ... up -d grafana >/dev/null 2>&1   # stderr discarded
+  echo "--- REVERTED ---"                      # prints unconditionally
+}
+trap revert EXIT
+...
+cd /root/LangfuseMonitoring                    # cwd changed before the trap ran
+```
+
+An `EXIT` trap runs in whatever working directory the shell has reached, **not** the one
+it was defined in. By then `cd` had moved up a level, so `.env` resolved to the repo root:
+the restore wrote a new file instead of overwriting the intended one, and the `compose`
+call failed for the same reason. Both were silent — one because `cp` legitimately
+succeeded at the wrong path, the other because its stderr went to `/dev/null`. The `echo`
+then reported success it had not verified.
+
+**Why it is worse than it looks.** `.gitignore` covered `infra/.env`, not `.env`. The stray
+copy was therefore untracked, unignored, and one `git add -A` away from publishing every
+production credential. `test-secret-hygiene.sh` passed throughout — it asserted
+`infra/.env` was not tracked, which remained perfectly true.
+
+**Fixes applied.**
+
+- `.gitignore` patterns are now **unanchored** (`.env`, `.env.bak-*`), so they match at any
+  depth rather than only in `infra/`.
+- `test-secret-hygiene.sh` now fails on *any* env-shaped file that is untracked and
+  unignored, via `git ls-files -o --exclude-standard` — the question that actually matters
+  ("could this be committed?") rather than a fixed path.
+
+**Rules.**
+
+1. **Use absolute paths in `trap` handlers.** The handler's working directory is wherever
+   the shell ended up, which is rarely where the handler was written.
+2. **Never print a success message a command did not earn.** Check the status, or do not
+   claim the outcome.
+3. **`2>/dev/null` on a cleanup path hides exactly the failure you wrote the cleanup for.**
+   Same root cause as issues 16 and 17 — three separate bugs this project has had where
+   discarded stderr turned a loud failure into a confident, wrong success.
+
+---
+
 ## Diagnostic checklist
 
 When a service will not start, in this order:

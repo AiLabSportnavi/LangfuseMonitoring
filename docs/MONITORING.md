@@ -273,8 +273,19 @@ is read-only and the image is pinned and single-purpose — but it is the larges
 here and should be the first thing revisited at Tier 2, where these metrics come from the kubelet
 instead.
 
-**Grafana SSO is not implemented.** Grafana speaks generic OAuth and could use the same Entra app
-registration as Langfuse. That is the natural follow-up once the allowlist is relaxed.
+**Grafana SSO is prepared but not enabled.** Entra ID sign-in is wired into
+`compose.monitoring.yaml` and defaults to off; turning it on is an `infra/.env` change.
+Setup, cut-over and rollback: [`docs/GRAFANA-SSO.md`](GRAFANA-SSO.md).
+
+Two corrections to what this section previously said. Entra ID OAuth is a **first-class
+Grafana OSS provider** (`[auth.azuread]`), not something to bolt on through generic OAuth.
+And it takes its **own app registration** — sharing Langfuse's would merge two apps' redirect
+URIs and app roles, and put both behind one client secret whose expiry takes down the
+platform and its monitoring together. Same tenant, separate registration.
+
+SSO also does **not** supersede `ADMIN_ALLOWLIST`. Identity and network reach answer
+different questions, and CLAUDE.md §12.1 keeps the UI behind the allowlist regardless.
+Relaxing it is a separate decision, not a consequence of enabling SSO.
 
 ---
 

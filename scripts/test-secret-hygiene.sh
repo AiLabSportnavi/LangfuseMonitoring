@@ -34,4 +34,27 @@ if [ -f infra/.env.example ]; then
   fi
 fi
 
+# No secret-bearing env file is one `git add -A` from being published.
+#
+# Checking only "infra/.env is not tracked" leaves the real gap: a COPY landing
+# somewhere else. A backup taken before a config change, or a script whose
+# relative path resolved against the wrong working directory, produces a file
+# holding every production secret that is untracked, unignored, and invisible to
+# the check above. Both have happened in this repo.
+#
+# git ls-files -o lists untracked files; --exclude-standard drops the ones
+# .gitignore already covers. Anything env-shaped left in that list is exposed.
+exposed=$(git ls-files -o --exclude-standard \
+  | grep -E '(^|/)\.env($|\.)' \
+  | grep -vE '\.env\.example$' || true)
+
+if [ -n "$exposed" ]; then
+  echo "FAIL: env file(s) untracked AND unignored — 'git add -A' would commit them:"
+  printf '        %s\n' $exposed
+  echo "      Add a matching pattern to .gitignore, or move the file out of the repo."
+  fail=1
+else
+  echo "PASS: no unignored env files loose in the working tree"
+fi
+
 exit $fail

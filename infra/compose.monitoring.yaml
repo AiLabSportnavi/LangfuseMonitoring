@@ -111,6 +111,54 @@ services:
       GF_AUTH_ANONYMOUS_ENABLED: "false"
       GF_USERS_ALLOW_SIGN_UP: "false"
       GF_USERS_ALLOW_ORG_CREATE: "false"
+
+      # ── Entra ID (Microsoft Entra / Azure AD) SSO ──────────────────────────
+      # Same tenant as Langfuse, separate app registration. Setup, app-role
+      # assignment and the cut-over procedure: docs/GRAFANA-SSO.md.
+      #
+      # INERT BY DEFAULT. With GRAFANA_SSO_ENABLED unset, Grafana behaves exactly
+      # as it did before this block existed — the provider is off and none of the
+      # empty values below are read. Enabling is a change to infra/.env only.
+      #
+      # Entra ID OAuth is a Grafana OSS feature. Only Team Sync and org_mapping
+      # are Enterprise, and a single-org install needs neither.
+      GF_AUTH_AZUREAD_ENABLED: ${GRAFANA_SSO_ENABLED:-false}
+      GF_AUTH_AZUREAD_NAME: Microsoft Entra ID
+      GF_AUTH_AZUREAD_CLIENT_AUTHENTICATION: client_secret_post
+      GF_AUTH_AZUREAD_CLIENT_ID: ${GRAFANA_AZURE_AD_CLIENT_ID:-}
+      GF_AUTH_AZUREAD_CLIENT_SECRET: ${GRAFANA_AZURE_AD_CLIENT_SECRET:-}
+      # Tenant is shared with Langfuse deliberately — one directory is the whole
+      # point of centralising this. The app registration is NOT shared (§2 of
+      # docs/GRAFANA-SSO.md explains why).
+      GF_AUTH_AZUREAD_AUTH_URL: https://login.microsoftonline.com/${AUTH_AZURE_AD_TENANT_ID:-common}/oauth2/v2.0/authorize
+      GF_AUTH_AZUREAD_TOKEN_URL: https://login.microsoftonline.com/${AUTH_AZURE_AD_TENANT_ID:-common}/oauth2/v2.0/token
+      GF_AUTH_AZUREAD_SCOPES: openid email profile
+      # The tenant lock. Entra has no allowed-domains concept, so pinning the
+      # tenant id here is what stops an identity from another directory being
+      # accepted — the same role signInAudience=AzureADMyOrg plays for Langfuse
+      # (DEPLOYMENT-PITFALLS.md #13). Belt and braces: set BOTH.
+      GF_AUTH_AZUREAD_ALLOWED_ORGANIZATIONS: ${AUTH_AZURE_AD_TENANT_ID:-}
+      # Distinct from GF_USERS_ALLOW_SIGN_UP above, which governs Grafana's own
+      # signup form. This one governs whether an Entra identity that has no
+      # Grafana user yet gets one. It MUST be true: with it false, only accounts
+      # that already exist locally could use SSO, which is nobody.
+      GF_AUTH_AZUREAD_ALLOW_SIGN_UP: "true"
+      # false: an identity with no app role gets auto_assign_org_role (Viewer).
+      # true:  an identity with no app role is REFUSED.
+      # Start false so the first login can succeed and be verified, then tighten.
+      # Flipping to true before roles are assigned locks out everyone at once.
+      GF_AUTH_AZUREAD_ROLE_ATTRIBUTE_STRICT: ${GRAFANA_SSO_ROLE_STRICT:-false}
+      # Lets the GrafanaAdmin app role grant server-admin, so admin rights are
+      # managed in Entra rather than locally. Without it the only server admin is
+      # the break-glass local account.
+      GF_AUTH_AZUREAD_ALLOW_ASSIGN_GRAFANA_ADMIN: "true"
+      GF_AUTH_AZUREAD_USE_PKCE: "true"
+      # THE BREAK-GLASS SWITCH. While false, the local admin login form stays
+      # available alongside SSO. Do not set this true until an Entra login has
+      # actually succeeded — verified by signing in, not by reading config
+      # (DEPLOYMENT-PITFALLS.md #11). Setting it true with a broken provider
+      # locks every human out of the monitoring UI.
+      GF_AUTH_DISABLE_LOGIN_FORM: ${GRAFANA_DISABLE_LOGIN_FORM:-false}
       # This is a private EU platform (GDPR, CLAUDE.md §4). No callbacks out.
       GF_ANALYTICS_REPORTING_ENABLED: "false"
       GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
