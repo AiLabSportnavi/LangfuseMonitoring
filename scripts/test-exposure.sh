@@ -129,30 +129,60 @@ echo
 if [ -n "$gf" ] && [ "$gf" != "https://" ]; then
   echo "── Grafana: ${gf} ──────────────────────────────────────────────────────"
 
-  # F-01, exactly as it was found. An arbitrary internet client received
-  # {"database":"ok","version":"13.0.6"} from this endpoint. Any JSON carrying
-  # "version" here means the request reached grafana:3000.
-  b="$(body "${gf}/api/health")"
-  case "$b" in
-    *'"version"'*)
-      bad "Grafana /api/health served application JSON to ${vantage} — this is F-01" ;;
-    *)
-      pass "Grafana /api/health did not leak application JSON" ;;
+  # ── REWRITTEN 2026-08-12, when the allowlist was replaced by identity ──────
+  # The two checks that used to live here asserted the ALLOWLIST model: that an
+  # untrusted client could not reach Grafana at all. Under identity-based access
+  # control that expectation is simply wrong, and leaving it in place produced
+  # two false FAILs against a correctly secured server.
+  #
+  # Reaching Grafana is no longer the finding. AUTHENTICATING without an Entra
+  # identity is. So these now assert behaviour instead of reachability.
+
+  # /api/health is deliberately public — same posture as Langfuse's health
+  # endpoint above, and for the same reason: the off-host monitor must be able
+  # to see that the service is up without holding a credential. It exposes a
+  # version string and nothing else. What must NOT be readable is application
+  # data, so assert on a PROTECTED endpoint rather than on the health one.
+  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "${gf}/api/user" 2>/dev/null || echo 000)"
+  case "$code" in
+    401|403) pass "Grafana API requires authentication (${code} on /api/user)" ;;
+    200)     bad  "Grafana /api/user returned 200 to ${vantage} — unauthenticated read of application data" ;;
+    *)       info "Grafana /api/user returned ${code} — unexpected, inspect manually" ;;
   esac
 
-  # With SSO enabled and the login form disabled, /login should redirect to
-  # Microsoft rather than render a password form.
-  hdrs="$(curl -s -o /dev/null -D - --max-time 15 "${gf}/login" 2>/dev/null || true)"
-  loc="$(printf '%s' "$hdrs" | sed -n 's/^[Ll]ocation: *//p' | tr -d '\r' | head -1)"
-  case "$loc" in
-    *login.microsoftonline.com*) pass "Grafana /login redirects to Entra ID" ;;
-    "") lb="$(body "${gf}/login")"
-        case "$lb" in
-          *"password"*|*"Password"*)
-            bad "Grafana serves a password login form to the internet (SSO not enforced)" ;;
-          *)  info "Grafana /login served a page with no obvious password form — inspect manually" ;;
-        esac ;;
-    *)  info "Grafana /login redirects to ${loc} — verify this is the SSO provider" ;;
+  # THE decisive password check. Do NOT string-match the /login HTML: Grafana is
+  # a single-page app, so /login returns a 200 shell whose JS bundle contains
+  # the word "password" whether or not the credentials provider is enabled. The
+  # old check did exactly that and would have reported a password form on a
+  # server where password auth was completely disabled.
+  #
+  # Instead, attempt the credentials grant. With GF_AUTH_DISABLE_LOGIN_FORM and
+  # GF_AUTH_BASIC_ENABLED both false, Grafana answers 400 auth.client.notConfigured.
+  # A 401 is also a pass — wrong credentials, but the mechanism is still live and
+  # that is worth distinguishing, so it is reported separately.
+  lr="$(curl -s --max-time 15 -H 'Content-Type: application/json' \
+        -d '{"user":"admin","password":"exposure-probe-not-a-real-password"}' \
+        "${gf}/login" 2>/dev/null || true)"
+  case "$lr" in
+    *notConfigured*)
+      pass "password login is not configured — SSO is the only authenticator" ;;
+    *"Invalid username"*|*"Unauthorized"*|*invalidCredentials*)
+      bad "Grafana still accepts credential logins (rejected these creds, but the mechanism is live)" ;;
+    *)
+      info "Grafana /login credential probe returned an unrecognised body — inspect manually" ;;
+  esac
+
+  # HTTP Basic is a SEPARATE authenticator from the login form and survives
+  # GF_AUTH_DISABLE_LOGIN_FORM. Verified live on 2026-08-12: before
+  # GF_AUTH_BASIC_ENABLED=false, `curl -u admin:<pw> /api/user` returned the
+  # admin user with isGrafanaAdmin:true while the form was already disabled.
+  # Disabling the form alone is NOT "SSO only", so this is checked on its own.
+  bcode="$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 \
+           -u 'admin:exposure-probe-not-a-real-password' "${gf}/api/user" 2>/dev/null || echo 000)"
+  case "$bcode" in
+    401|403) pass "HTTP Basic auth rejected (${bcode}) — the second password door is shut" ;;
+    200)     bad  "HTTP Basic auth returned 200 — password authentication is still live" ;;
+    *)       info "HTTP Basic probe returned ${bcode} — inspect manually" ;;
   esac
 
   # F-15: duplicate conflicting X-Frame-Options. Browsers treat duplicates as
