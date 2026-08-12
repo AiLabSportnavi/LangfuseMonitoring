@@ -207,8 +207,29 @@ decrypt "${SRC}/clickhouse.tar.gz.enc" | gzip -d \
   | docker exec -i "${PROJECT}-ch" sh -c 'mkdir -p /var/lib/clickhouse/backups && tar -C /var/lib/clickhouse/backups -xf -' \
   || fail "could not unpack the ClickHouse archive"
 
+# ⚠️ --enable_full_text_index=1 is REQUIRED, and it is not a quirk of this
+# rehearsal — it is a real disaster-recovery blocker found by running it.
+#
+# Langfuse's `events_full` table carries a text index. Creating such a table is
+# gated behind a setting that is OFF BY DEFAULT and, verified on 2026-08-12, is
+# off on the production server too (system.settings: enable_full_text_index=0,
+# changed=0). The table exists there because the Langfuse migration enabled the
+# setting for its own session when it created it.
+#
+# RESTORE re-executes those CREATE TABLE statements, so without this flag the
+# restore dies partway through with:
+#
+#   Code: 344 ... The text index feature is disabled.
+#              Enable the setting 'enable_full_text_index' ... While creating
+#              table default.events_full  (SUPPORT_IS_DISABLED)
+#
+# A real recovery on a fresh box would have failed exactly here, at the worst
+# possible moment, on a server whose defaults match production. That is the
+# whole argument for CLAUDE.md §13's "a backup is valid because a restore
+# worked" — six green backup runs would never have surfaced this.
 docker exec "${PROJECT}-ch" clickhouse-client \
   --user "$CLICKHOUSE_USER" --password "$CLICKHOUSE_PASSWORD" \
+  --enable_full_text_index=1 \
   --query "RESTORE DATABASE default FROM File('${CH_NAME}')" >/dev/null \
   || fail "ClickHouse RESTORE failed for ${CH_NAME}"
 
