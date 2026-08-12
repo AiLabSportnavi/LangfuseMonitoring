@@ -3,13 +3,21 @@
 Puts the monitoring UI behind the same directory as Langfuse, so access is granted and
 revoked in one place instead of by sharing a password.
 
-**Status: ENABLED and enforcing as of 2026-08-12.** SSO is the only authenticator: the
+**Status: ENABLED and enforcing as of 2026-08-12.** SSO is the only authenticator — the
 login form and HTTP Basic are both disabled, and `ADMIN_ALLOWLIST` has been removed (§8).
-The text below describing the disabled-by-default state is retained as the enablement
-procedure. Every variable ships defaulted to off. Until
-`GRAFANA_SSO_ENABLED=true` is set in `infra/.env`, Grafana behaves exactly as it did
-before this document existed. Enabling is an `.env` change plus a container recreate — no
-code change, no image change.
+
+Verified on the live deployment, not inferred from config:
+
+| Probe | Result |
+|---|---|
+| `POST /login` with the real admin password | `400 auth.client.notConfigured` |
+| `curl -u admin:<real password> /api/user` | `401` |
+| `GET /api/user` unauthenticated | `401` |
+| `GET /login/azuread` | redirects to the correct tenant, PKCE `S256` |
+
+Every variable still **ships** defaulted to off, so a fresh deployment of this repo starts
+with SSO disabled and must be enabled deliberately. §§3–5 remain the procedure for doing
+that; they describe the starting state, not the current one.
 
 ---
 
