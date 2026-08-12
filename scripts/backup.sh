@@ -182,7 +182,11 @@ else
   $COMPOSE exec -T postgres \
     pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc --no-password \
     | encrypt_to "${WORK}/postgres.dump.enc"
-  [ -s "${WORK}/postgres.dump.enc" ] || fail "postgres dump is empty — refusing to call this a backup"
+  # 1 KiB floor, not `-s`: openssl emits ~48 bytes for empty input, so a
+  # non-zero size proves nothing about whether pg_dump produced any data.
+  PG_BYTES=$(stat -c %s "${WORK}/postgres.dump.enc" 2>/dev/null || echo 0)
+  [ "$PG_BYTES" -gt 1024 ] || \
+    fail "postgres dump is ${PG_BYTES} bytes — refusing to call this a backup"
 fi
 
 # ── 2. ClickHouse ─────────────────────────────────────────────────────────────
@@ -205,7 +209,9 @@ else
   $COMPOSE exec -T clickhouse \
     tar -C /var/lib/clickhouse/backups -cf - "$CH_BACKUP" \
     | gzip -6 | encrypt_to "${WORK}/clickhouse.tar.gz.enc"
-  [ -s "${WORK}/clickhouse.tar.gz.enc" ] || fail "clickhouse archive is empty"
+  # Same 1 KiB floor and same reason as the postgres check above.
+  CH_BYTES=$(stat -c %s "${WORK}/clickhouse.tar.gz.enc" 2>/dev/null || echo 0)
+  [ "$CH_BYTES" -gt 1024 ] || fail "clickhouse archive is ${CH_BYTES} bytes — empty, not a backup"
 
   # Reclaim the space immediately. Not deferred to the prune step: a failure
   # between here and there would leave it on disk indefinitely.
@@ -214,18 +220,48 @@ else
 fi
 
 # ── 3. MinIO ──────────────────────────────────────────────────────────────────
-# Raw ingestion events and media. `mc mirror` into a scratch path in the
-# container, then stream it out — mc cannot write to the host directly.
-log "minio: mirror buckets"
+# Raw ingestion events and media, archived from the DATA VOLUME rather than
+# through `mc`.
+#
+# ⚠️ The previous implementation ran `mc mirror` into /tmp inside the MinIO
+# container and then `tar`red it out. It could never have worked: the
+# minio/minio image ships `mc` but NOT `tar`. Verified on 2026-08-12 —
+# the step died with `sh: line 3: tar: command not found`, which is also the
+# first time this script had ever been run against the live stack.
+#
+# Archiving the volume instead is both simpler and strictly better: it captures
+# every bucket plus `.minio.sys` (bucket policies, versioning config), whereas
+# mirroring one bucket captured only that bucket's objects. It also needs no
+# credentials, so a rotated MINIO_ROOT_PASSWORD cannot silently break backups.
+#
+# The helper is postgres:17-alpine, an image this deployment ALREADY pins and
+# pulls, chosen over alpine:3 so the backup path introduces no new supply-chain
+# dependency and no floating tag (CLAUDE.md §14: never `latest`, pin versions).
+# It is used purely as a source of busybox `tar`; nothing Postgres runs.
+#
+# Read-only mount: a backup job must never be able to mutate the data it backs
+# up. MinIO stays running — object stores tolerate this because objects are
+# written whole, so a concurrent write yields either the old object or the new
+# one, never a torn one.
+log "minio: archive data volume"
+MINIO_VOLUME="$($COMPOSE ps -q minio 2>/dev/null | head -1 | xargs -r docker inspect \
+  --format '{{range .Mounts}}{{if eq .Destination "/data"}}{{.Name}}{{end}}{{end}}' 2>/dev/null)"
 if [ "$DRY_RUN" = 1 ]; then
-  log "[dry-run] mc mirror -> ${WORK}/minio.tar.gz.enc"
+  log "[dry-run] tar minio volume -> ${WORK}/minio.tar.gz.enc"
 else
-  $COMPOSE exec -T -e MC_HOST_local="http://${MINIO_ROOT_USER}:${MINIO_ROOT_PASSWORD}@minio:9000" \
-    minio sh -c 'rm -rf /tmp/mcbak && mkdir -p /tmp/mcbak &&
-                 mc mirror --quiet local/'"${LANGFUSE_S3_EVENT_UPLOAD_BUCKET:-langfuse}"' /tmp/mcbak >/dev/null &&
-                 tar -C /tmp -cf - mcbak && rm -rf /tmp/mcbak' \
+  [ -n "$MINIO_VOLUME" ] || fail "could not resolve the MinIO /data volume name"
+  docker run --rm -v "${MINIO_VOLUME}:/data:ro" postgres:17-alpine \
+    tar -C /data -cf - . \
     | gzip -6 | encrypt_to "${WORK}/minio.tar.gz.enc"
-  [ -s "${WORK}/minio.tar.gz.enc" ] || fail "minio archive is empty"
+
+  # NOT `-s`. openssl emits a 48-byte header+padding block for EMPTY input, so
+  # `-s` (non-zero size) passes on a completely failed archive — which is
+  # exactly how the broken `mc`/tar step above reported success-shaped output
+  # while capturing nothing. Anything under 1 KiB here is an empty tar, not a
+  # real bucket, so it is treated as a failure rather than a quiet no-op.
+  MINIO_BYTES=$(stat -c %s "${WORK}/minio.tar.gz.enc" 2>/dev/null || echo 0)
+  [ "$MINIO_BYTES" -gt 1024 ] || \
+    fail "minio archive is ${MINIO_BYTES} bytes — that is an empty archive, not a backup"
 fi
 
 # ── Manifest ──────────────────────────────────────────────────────────────────
