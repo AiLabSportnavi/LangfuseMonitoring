@@ -39,6 +39,45 @@ Reached in ordered phases (§10) — foundation first.
 
 ---
 
+## 2.1 Current Objective: Self-Hosted Langfuse Platform Completeness
+
+> **Make the self-hosted Langfuse platform fully functional and correctly integrated with the
+> application. Every Langfuse feature supported by the installed OSS version and deployment mode
+> must be configured, verified, and usable from the self-hosted Langfuse UI.**
+
+This objective is **broader than connecting the agent to Langfuse**, and broader than prompt
+management. The Langfuse UI is the primary place the platform is operated from. A feature is not
+"working" because its page loads — it is working when it has been exercised end to end and the data
+appears correctly.
+
+**Standing constraints for this phase:**
+
+- **`agent/instructions.md` must never be removed, renamed or replaced.** It holds the agent's core
+  rules and ships with the code. It was deleted once; that was wrong and has been reverted.
+- **Local instructions stay part of the application.** Langfuse manages a *separate*, additive layer.
+- **Langfuse must not be a single point of failure.** A mistaken prompt edit in the UI, or Langfuse
+  being unreachable, must degrade tone at worst — never remove the agent's core instructions and
+  never stop it answering.
+- **No duplicate system instructions.** eve concatenates `agent/instructions.md` with every entry in
+  `agent/instructions/`, so any text present in both layers is emitted twice in every prompt.
+  Enforced by `npm run verify:instructions`.
+- **Prompt versions, labels and rollback must work**, including a local fallback.
+- **Traces must carry correct model, session, user and environment metadata** — an anonymous LLM
+  call is a defect, not a cosmetic issue, because cost attribution depends on it.
+- **Playground, Datasets, Evaluators, Experiments, Scores and LLM Connections must work** where the
+  installed version supports them.
+- **Unsupported features are documented, never faked.** If OSS, `events_only` mode, or the installed
+  version blocks something, say so precisely instead of building a replacement.
+- **Automation is out of scope for this phase.** No CI/CD prompt deployment, no scheduled evaluation,
+  no automatic promotion or rollback jobs, no background synchronisation. The platform must first be
+  operable by hand through the UI.
+
+Feature-by-feature status, verification commands and known limitations:
+[`docs/PLATFORM-STATUS.md`](docs/PLATFORM-STATUS.md).
+Prompt architecture and the two-layer split: [`docs/PROMPT-MANAGEMENT.md`](docs/PROMPT-MANAGEMENT.md).
+
+---
+
 ## 3. Current phase
 
 > ### **Phase 1 — Self-hosted Langfuse hosting, scaling, and high-quality tracing.**
@@ -118,9 +157,11 @@ hosted on Hetzner. This split is deliberate and correct.
                               Basic auth (per-project Langfuse keys)
                                                       │
 ┌──────────────── Hetzner dedicated, EU (Falkenstein/Helsinki) ───▼───────────┐
-│  Caddy / Traefik  ── TLS termination, rate limiting                          │
-│      ├── /api/public/otel , /api/public/ingestion  → PUBLIC (key-authed)     │
-│      └── everything else (UI, admin)               → IP allowlist / VPN      │
+│  Caddy  ── TLS termination, rate limiting                                    │
+│      ├── /api/public/otel/v1/traces, /api/public/ingestion → PUBLIC (keys)   │
+│      ├── /api/public/health , /api/public/ready            → PUBLIC (probes) │
+│      ├── rest of /api/public/* (prompts, datasets, scores) → PUBLIC (keys)   │
+│      └── UI / admin / /api/auth/*                → Entra ID SSO, 1 tenant    │
 │                                                                              │
 │  langfuse-web  ×N     langfuse-worker ×N                                     │
 │  Postgres    ClickHouse (1 shard)    Redis/Valkey                            │
@@ -138,11 +179,14 @@ below hyperscalers — directly serving requirements 4, 5 and 11.
 theoretical elasticity. Kubernetes + a self-operated ClickHouse cluster is a real ongoing job. The
 scale path to Helm exists (§8.2) and is taken only when a measured trigger fires.
 
-**Ingest endpoint is public; UI is not.** Vercel serverless functions have **no static egress IPs**
-outside Enterprise Secure Compute, so IP-allowlisting ingest is impossible. Therefore:
-`/api/public/otel` and `/api/public/ingestion` are internet-reachable, protected by TLS,
-per-project API keys, and reverse-proxy rate limiting. The **UI and admin surface are restricted**
-to VPN/allowlist. Do not "simplify" by exposing the whole app.
+**The API is public and key-authenticated; the UI is public and identity-gated.** Vercel serverless
+functions have **no static egress IPs** outside Enterprise Secure Compute, so IP-allowlisting ingest
+was never possible. That constraint has since been generalised: `ADMIN_ALLOWLIST` is **removed**, and
+the whole surface is internet-reachable, protected by TLS, per-project API keys and reverse-proxy
+rate limiting — with the **UI and admin routes gated by Entra ID SSO (single-tenant)** rather than by
+network position. See §12.1 for what this changes and why. Langfuse's own guidance supports it: the
+`langfuse/langfuse` container is designed to be exposed publicly, has undergone penetration testing,
+and is the same image serving Langfuse Cloud.
 
 **Best-effort export.** OTLP export is asynchronous and non-blocking. Langfuse being down degrades
 observability, never the agent. No durable ingest buffer at Tier 1 — losing an outage window of
@@ -172,7 +216,7 @@ export default defineInstrumentation({
 });
 ```
 
-Langfuse accepts OTLP at **`/api/public/otel`** with:
+Langfuse accepts OTLP at **`/api/public/otel/v1/traces`** with:
 
 ```
 Authorization: Basic base64(pk-lf-...:sk-lf-...)
@@ -180,6 +224,11 @@ x-langfuse-ingestion-version: 4
 ```
 
 No bespoke SDK glue is required — this is a standards-based OTel path end to end.
+
+> ⚠️ **The path is `/api/public/otel/v1/traces`, not `/api/public/otel`.** Verified 2026-08-11
+> against the live 4.6.0 instance: a bare `POST /api/public/otel` returns **404**. The Caddy matcher
+> `/api/public/otel*` is a wildcard, so it already covers the real path — but any hand-written curl,
+> canary or exporter config using the bare path will silently fail.
 
 ### 6.2 The shared tracing layer — `@org/agent-telemetry`
 
@@ -379,9 +428,8 @@ rather than an emergency refactor.
 
 From <https://langfuse.com/self-hosting/scaling> — the official strategies, in the order to reach for them:
 
-1. **Scale worker containers.** Ingestion is asynchronous: `POST /api/public/ingestion` queues events
-   and returns **207** immediately. Throughput is governed by worker count and concurrency, not by
-   the web tier.
+1. **Scale worker containers.** Ingestion is asynchronous: the OTLP endpoint queues events and returns
+   immediately. Throughput is governed by worker count and concurrency, not by the web tier.
 2. **Separate ingestion from UI.** Run distinct web deployments for ingest and for the UI so heavy
    analytical queries by humans cannot starve ingestion. **This is the Tier 2 upgrade to make first**
    — it is a topology change, cheaper than new hardware.
@@ -474,8 +522,8 @@ exists — the thresholds in `OPERATIONS.md` §2 were written before anything wa
 > depth from BullMQ's Redis keys, ingestion throughput from ClickHouse inserted rows, availability
 > from blackbox probes, request load from Caddy. Do not go looking for `/metrics` on web or worker.
 >
-> Throughput is read at ClickHouse rather than at the edge on purpose: `/api/public/ingestion`
-> returns **207 on enqueue**, so an edge request rate can look healthy while nothing is persisted.
+> Throughput is read at ClickHouse rather than at the edge on purpose: the ingest endpoint answers
+> **on enqueue**, so an edge request rate can look healthy while nothing is persisted.
 
 The two dominant risks, both slow-moving and both catchable well in advance:
 
@@ -494,9 +542,20 @@ An independent, **off-host** monitor probes the platform from outside. Verified 
 | `GET /api/public/health` | Liveness. `?failIfDatabaseUnavailable=true` for deep check |
 | `GET /api/public/ready` | Readiness — **returns 500 after SIGTERM**, so traffic drains on shutdown |
 
-**The ingestion canary is the check that matters most:** write a trace, then read it back.
-`POST /api/public/ingestion` returns **207 (queued)**, not stored — so a 207, and even a healthy
-`/health`, can coexist with a completely backlogged pipeline. Only a read-back proves the path works.
+**The ingestion canary is the check that matters most:** write a trace, then read it back. Ingest
+accepts on *enqueue*, not on store — so an accepted write, and even a healthy `/health`, can coexist
+with a completely backlogged pipeline. Only a read-back proves the path works.
+
+> ⚠️ **This server runs ingestion in `events_only` mode.** Verified 2026-08-11:
+> `POST /api/public/ingestion` still authenticates, but **rejects `trace-create` events** — it accepts
+> only **score and log** events. The v3 read endpoints (`/api/public/traces`, `/api/public/observations`)
+> return **404** in this mode.
+>
+> The canary must therefore write via `POST /api/public/otel/v1/traces` and read back via
+> `GET /api/public/v2/observations`. [`scripts/ingestion-canary.sh`](scripts/ingestion-canary.sh)
+> already does exactly this and documents why — **do not "fix" it back to the legacy endpoint.**
+> The consequence that matters positively: **score ingestion over `/api/public/ingestion` still works**,
+> which is what the evaluation layer depends on.
 
 ### 10.3 Alert severity
 
@@ -562,10 +621,45 @@ The ingest/UI split from §5.3 is a security boundary, not just a scaling one:
 
 | Surface | Exposure | Controls |
 |---|---|---|
-| `/api/public/otel`, `/api/public/ingestion` | **Public** (Vercel has no static egress IPs outside Enterprise) | TLS · per-project keys · rate limiting · request-size limits · abuse protection |
-| UI / admin / all other routes | **Restricted** | SSO · VPN or IP allowlist · RBAC · signup disabled after provisioning |
+| `/api/public/otel*`, `/api/public/ingestion*` | **Public** (Vercel has no static egress IPs outside Enterprise) | TLS · per-project keys · rate limiting · request-size limits · abuse protection |
+| `/api/public/health`, `/api/public/ready` | **Public** | Required by the off-host monitor (§10.2); deliberately not rate limited |
+| Rest of `/api/public/*` (prompts, datasets, scores, metrics) | **Public, key-authenticated** | TLS · per-project keys · rate limiting |
+| UI / admin / `/api/auth/*` | **Public, identity-gated** | **Entra ID SSO, single-tenant** · RBAC · signup disabled · `/api/auth/*` rate limited |
 
-> Do not expose the entire administration surface merely because ingestion must be public.
+> Do not expose the entire administration surface merely because ingestion must be public — but note
+> that "restricted" now means **identity**, not network position.
+
+#### ⚠️ `ADMIN_ALLOWLIST` is retired — access control is identity, not IP
+
+The IP-allowlist model is replaced by **Microsoft Entra ID SSO (single-tenant)** for the Langfuse
+site block. The config change lands in the same commit as this section; it takes effect on the
+**next Caddy reload**, so treat the server as the source of truth until then
+(`docker exec langfuse-caddy-1 sh -c 'echo $ADMIN_ALLOWLIST'`).
+
+Pre-flight evidence gathered 2026-08-11, before the cut-over: `caddy validate` passes in the
+server's own `langfuse-caddy:2.11.4-ratelimit-0.1.0` image, and password login is genuinely
+refused (`POST /api/auth/callback/credentials` → redirect to `signin?csrf=true`,
+`GET /api/auth/session` → `{}`), so SSO is enforcing rather than merely configured.
+
+> **A `401` from an API does not prove the allowlist is off.** An allowlisted client sees `401`
+> too — the allowlist rejects with `403` only for addresses *outside* it. Distinguishing the two
+> from a single client is impossible; probe an allowlist-gated surface (the Grafana host) or read
+> the running container's env. This was gotten wrong once already, by reading `401` as "no network
+> gate" from an address that turned out to be allowlisted.
+
+Two consequences that matter for **every future integration**:
+
+1. **A `403` from a Langfuse API is no longer an allowlist rejection.** Do not go looking for an IP to
+   add — that advice is obsolete and sends you down a dead end. A `401` means bad or missing keys.
+2. **Agents on Vercel and GitHub-hosted CI runners can both reach the full public API.** Runtime
+   prompt fetching, dataset sync, experiment runs and score ingestion need **no** network exception.
+
+The driver was operational, not cosmetic: the operator's allowlist entry was a **dynamic residential
+IP**, so a rotation simultaneously locked out the UI, the REST API and the MCP endpoint — and handed
+allowlisted admin reach to whichever ISP customer inherited the address.
+
+> `infra/caddy/Caddyfile` in this repo may still lag the deployed server. **The server is the source
+> of truth for exposure**; verify with `curl` before designing around either.
 
 All external traffic is HTTPS/TLS — agent→ingest and developer→UI alike. Internal traffic protected
 per the deployment topology. Certificate expiry is monitored (§5 of the runbook).
@@ -785,6 +879,51 @@ releases.
 - OTLP endpoint & attribute mapping — <https://langfuse.com/integrations/native/opentelemetry>
 - Tracing best practices *(fetch fresh when auditing)* — <https://langfuse.com/docs/observability/best-practices>
 - Observation types — <https://langfuse.com/docs/observability/features/observation-types>
+- Prompt management — <https://langfuse.com/docs/prompt-management/get-started>
+- Prompt → trace linking *(**see the §18.1 caveat below before following it**)* — <https://langfuse.com/docs/prompt-management/features/link-to-traces>
+- Experiments via SDK — <https://langfuse.com/docs/evaluation/experiments/experiments-via-sdk>
+- Experiments in CI/CD — <https://langfuse.com/docs/evaluation/experiments/experiments-ci-cd>
+- LLM-as-a-judge — <https://langfuse.com/docs/evaluation/evaluation-methods/llm-as-a-judge>
+- LLM connection *(required before any managed evaluator can run)* — <https://langfuse.com/docs/administration/llm-connection>
+- Alerts / Monitors — <https://langfuse.com/docs/metrics/features/alerts>
+- Metrics API v2 — <https://langfuse.com/docs/metrics/features/metrics-api>
+- **Versions & compatibility matrix** *(what OSS v4 actually supports)* — <https://langfuse.com/self-hosting/upgrade/versioning#sdk-server>
+- Licensing — what is EE vs OSS — <https://langfuse.com/self-hosting/license-key>
+
+### 18.1 Verified version facts — check these before writing integration code
+
+Established 2026-08-11 against the live instance and the installed SDK. **These are the facts that
+were wrong in the docs or in this file, and each one cost time.**
+
+| Fact | Detail |
+|---|---|
+| **Server** | Langfuse **4.6.0**, OSS, **no EE licence**. |
+| **What is EE** | Only: project-level RBAC roles · **protected prompt labels** · retention policies · audit logs · server-side masking · UI customization · org creators · Org/Instance Management APIs. **Prompts, datasets, evaluators, experiments, annotation queues, alerts and automations are all OSS.** |
+| **JS SDK family is v5, not v4** | `@langfuse/{client,tracing,otel,core}` are at **5.x**. JS SDK v4 is *deprecated* and v3/v2 *unsupported* against an OSS v4 server. The legacy monolithic `langfuse` package is effectively dead here despite npm not flagging it. Pin ≥5.3.0 for the CI experiment action and ≥5.4.0 for real-time evaluation. |
+| **Metrics API** | `/api/public/metrics` is **gone**. Use **`/api/public/v2/metrics`**. The `traces` view no longer exists — use `observations` with the `isRootObservation` dimension. Cannot group by `id`/`traceId`/`userId`/`sessionId`; max 1000 rows. |
+| **Managed evaluators** | **22 templates ship with the image** (Hallucination, Faithfulness, Correctness, Relevance, Toxicity, Out-of-Scope Request, …). They carry no model — an **LLM Connection** must exist per project before any of them can run. |
+| **Code evaluators** | Disabled unless `LANGFUSE_CODE_EVAL_DISPATCHER` is set. Off AWS the only option is `insecure-local`, which runs evaluator code **unsandboxed in the worker**. Deliberately left disabled — deterministic checks belong in SDK evaluators. |
+| **Evaluation Rules / Evaluators REST API** | Officially labelled **unstable**. Manage rules in the UI; treat any script as a read-only auditor. |
+
+> #### ⚠️ `metadata.langfusePrompt` does **not** link a prompt on SDK v5
+>
+> The official docs tell you to link a prompt to a Vercel AI SDK generation with
+> `experimental_telemetry: { metadata: { langfusePrompt: prompt.toJSON() } }`. **That is the v3
+> `LangfuseExporter` convention and it does nothing on `@langfuse/*@5.x`** — verified by grepping the
+> installed tree, where the string `langfusePrompt` does not appear at all. It silently lands a JSON
+> blob in observation metadata and creates **no link**.
+>
+> On v5 the mechanisms that exist are the span attributes **`langfuse.observation.prompt.name`** and
+> **`langfuse.observation.prompt.version`**, plus `propagateAttributes({ prompt }, fn)` from
+> `@langfuse/core`.
+>
+> **A fallback prompt never links.** Three `isFallback` guards drop the attributes when
+> `prompt.isFallback` is true, and it is logged only at `debug` level. So the situation where you most
+> need the trace to tell you something is exactly the one where Langfuse tells you nothing — carry an
+> explicit trace tag for it.
+>
+> **Verification standard: metadata presence is not evidence.** The prompt name must render as a
+> *clickable link* in the trace UI. Nothing else proves it.
 - Eve instrumentation — <https://eve.dev/docs/guides/instrumentation.md>
 - Eve execution model & durability — <https://eve.dev/docs/concepts/execution-model-and-durability.md>
 - Eve deployment on Vercel — <https://eve.dev/docs/guides/deployment/vercel.md>

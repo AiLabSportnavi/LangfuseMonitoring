@@ -1,0 +1,14 @@
+{
+  "name": "weather-agent/core",
+  "description": "Gating dataset for the weather agent. Covers the normal path plus nine adversarial and degraded-input categories. Small on purpose: every item is judged on every CI run, so growth must be earned by a real production failure rather than by seeding.",
+  "metadata": {
+    "owner": "ai-lab",
+    "agent": "eve-langfuse-poc",
+    "sourceOfTruth": "datasets/weather-agent-core/items/*.json",
+    "toolContract": {
+      "get_weather": "berlin=19/overcast, hamburg=17/light rain, munich=23/sunny; any other city returns the sentinel {tempC:20, conditions:'unknown'}",
+      "get_forecast": "berlin/hamburg/munich only, days 1-5; THROWS for any other city"
+    },
+    "notes": "expectedOutput is a contract, not a transcript. Only expectedTools is checked for exact equality — tool names and arguments are deterministic, and tool-call correctness is where most real regressions appear."
+  }
+}

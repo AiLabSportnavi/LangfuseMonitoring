@@ -1,0 +1,18 @@
+{
+  "name": "weather-assistant",
+  "type": "text",
+  "commitMessage": "Narrow to the tunable style layer; core rules move back to agent/instructions.md",
+  "labels": [],
+  "tags": ["agent:eve-langfuse-poc", "surface:instructions", "layer:style"],
+  "config": {
+    "layer": "style",
+    "appendedAfter": "agent/instructions.md",
+    "maxSentences": 2,
+    "variables": {
+      "supported_cities": "Rendered from agent/lib/cities.ts at resolve time, so the prompt cannot claim coverage the tools do not have.",
+      "temperature_unit": "Default unit for temperatures. Overridden per request when the user asks."
+    },
+    "safeToFailOpen": "If this prompt is unavailable the agent still has its core rules from agent/instructions.md. Losing this layer degrades tone, not behaviour."
+  },
+  "prompt": "## Response style\n\n- Answer in one or two short sentences. Lead with the number the user asked for.\n- Give temperatures in {{temperature_unit}} unless the user asks for another unit.\n- Do not restate the question or add pleasantries.\n- When a multi-day forecast is requested, note that detailed forecasts cover\n  {{supported_cities}}.\n"
+}

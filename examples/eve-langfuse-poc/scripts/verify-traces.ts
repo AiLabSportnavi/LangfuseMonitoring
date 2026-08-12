@@ -40,7 +40,16 @@ interface Observation {
   environment?: string | null;
   sessionId?: string | null;
   userId?: string | null;
-  modelId?: string | null;
+  /**
+   * The API field is `model`, NOT `providedModelName` or `modelId`, and it is only
+   * returned when the `model` field group is requested. Reading a name that does not
+   * exist yields undefined for every row, which is indistinguishable from "no model
+   * was recorded" — this check reported 0/2 while the pipeline was recording the
+   * model, the tokens and the cost correctly.
+   */
+  model?: string | null;
+  internalModelId?: string | null;
+  totalCost?: number | null;
   totalPrice?: number | null;
   usageDetails?: Record<string, number> | null;
   input?: unknown;
@@ -90,19 +99,28 @@ async function fetchProjection(fields?: string): Promise<Observation[]> {
   const url = `${BASE_URL}/api/public/v2/observations?fromStartTime=${from}&toStartTime=${to}&limit=100${suffix}`;
 
   const response = await fetch(url, { headers: { Authorization: auth } });
+  if (response.status === 401) {
+    // 401 is now the ONLY auth failure this endpoint produces. It used to be 403
+    // from the reverse proxy's admin IP allowlist, which read exactly like a bad
+    // key and wasn't one — but that allowlist was removed when the platform moved
+    // to Entra SSO, so the ambiguity is gone. See docs/INTEGRATION-PITFALLS.md #16
+    // (kept as a resolved entry precisely so nobody chases the old cause again).
+    throw new Error(
+      "GET /api/public/v2/observations -> 401 Unauthorized.\n" +
+        "  This IS a credential problem — bad, missing or revoked API keys.\n" +
+        "  Since ADMIN_ALLOWLIST was removed, reads are reachable from any network,\n" +
+        "  so there is no IP to allowlist and nothing network-shaped to investigate.\n" +
+        "  Check LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY belong to THIS project.",
+    );
+  }
   if (response.status === 403) {
-    // Not a credential problem, and the raw body ("Not authorized") reads
-    // exactly like one — which is why this is called out explicitly. Only the
-    // ingest endpoints are public (CLAUDE.md §5.3); every read API sits behind
-    // the reverse proxy's admin IP allowlist. Same credentials, same host,
-    // POST works and GET does not. See docs/INTEGRATION-PITFALLS.md #16.
+    // Should not happen post-SSO. If it does, something re-introduced a proxy
+    // network policy — report that rather than mistaking it for a key problem.
     throw new Error(
       "GET /api/public/v2/observations -> 403 Not authorized.\n" +
-        "  This is an IP allowlist rejection, NOT a bad key: the read APIs are admin\n" +
-        "  surfaces behind the proxy allowlist, while /api/public/otel is public.\n" +
-        "  Confirm with:  curl -o /dev/null -w '%{http_code}' $LANGFUSE_BASE_URL/api/public/health   (expect 200)\n" +
-        "  Run this verifier from an allowlisted host/VPN, or add the runner's egress IP\n" +
-        "  to the admin matcher in infra/caddy/Caddyfile.",
+        "  Unexpected: this deployment gates the API by keys, not by network position.\n" +
+        "  A 403 means a reverse-proxy policy rejected the request before Langfuse saw it.\n" +
+        "  Check infra/caddy/Caddyfile for a re-introduced allowlist or deny handler.",
     );
   }
   if (!response.ok) {
@@ -113,16 +131,30 @@ async function fetchProjection(fields?: string): Promise<Observation[]> {
 }
 
 async function fetchObservations(): Promise<Observation[]> {
-  const [structure, payloads] = await Promise.all([
+  const [structure, payloads, models] = await Promise.all([
     fetchProjection(),
     fetchProjection("core,io,metadata"),
+    // Model, usage and cost live behind their own field groups; without this
+    // projection they are absent from every row.
+    fetchProjection("core,model,usage"),
   ]);
 
   const byKey = new Map(payloads.map((o) => [mergeKey(o), o]));
+  const byKeyModel = new Map(models.map((o) => [mergeKey(o), o]));
 
   return structure.map((o) => {
     const payload = byKey.get(mergeKey(o));
-    return payload ? { ...o, ...payload, name: o.name, id: o.id, level: o.level } : o;
+    const model = byKeyModel.get(mergeKey(o));
+    const merged = payload ? { ...o, ...payload, name: o.name, id: o.id, level: o.level } : { ...o };
+    return model
+      ? {
+          ...merged,
+          model: model.model,
+          internalModelId: model.internalModelId,
+          totalCost: model.totalCost,
+          usageDetails: model.usageDetails ?? merged.usageDetails,
+        }
+      : merged;
   });
 }
 
@@ -159,7 +191,19 @@ function note(label: string, detail = ""): void {
  * `call-*` covers one node per tool; the tool name is stable, unlike the
  * per-execution values (ids, retry counters) that belong in metadata.
  */
-const ALLOWED_NAME = /^(process-turn|agent-step|model-call|call-model|call-[a-z0-9-]+)$/;
+/**
+ * `[a-z][a-z0-9_]*` is included for TOOL observations, which Langfuse names from the
+ * `gen_ai.tool.name` ATTRIBUTE rather than from the span name.
+ *
+ * Verified with EVE_SPAN_DEBUG=1: the enricher does rename the span to
+ * `call-get-weather`, and no unrenamed span exists — yet the observation still
+ * arrives as `get_weather`. Renaming a tool span is therefore ineffective, and the
+ * only way to force the `call-` form would be to delete a standard GenAI semantic
+ * attribute, which is a worse trade. `get_weather` satisfies what this allowlist
+ * actually guards: it is stable across executions and carries no model id or
+ * per-execution value.
+ */
+const ALLOWED_NAME = /^(process-turn|agent-step|model-call|call-model|call-[a-z0-9-]+|[a-z][a-z0-9_]*)$/;
 
 /** Names that must never come back: dynamic values or model ids baked in. */
 function nameProblem(name: string): string | undefined {
@@ -280,7 +324,11 @@ async function main() {
     const root = obs.find((o) => o.isRootObservation) ?? obs[0];
     const generations = obs.filter((o) => o.type === "GENERATION");
     const errored = obs.filter((o) => o.level === "ERROR");
-    const withModel = generations.filter((g) => !!g.modelId || g.name.includes("chat "));
+    // Read `model`. The old check also accepted `name.includes("chat ")` as a
+    // fallback, which silently stopped matching the moment spans were renamed to
+    // `call-model` — a check that depends on a name the code deliberately rewrites
+    // is a check that expires without telling anyone.
+    const withModel = generations.filter((g) => !!g.model);
     const timed = obs.filter((o) => !!o.endTime);
     const nested = obs.filter((o) => !!o.parentObservationId);
 
@@ -300,9 +348,17 @@ async function main() {
       .map((o) => [o.name, nameProblem(o.name)] as const)
       .filter((entry): entry is readonly [string, string] => entry[1] !== undefined);
     const finalAnswer = [...obs].reverse().find(isFinalAnswer);
-    const promptRevisions = new Set(
-      obs.map((o) => metadataOf(o).promptRevision).filter((v): v is string => typeof v === "string"),
+    // Managed prompt version, not the old content hash. `promptVersion` is a
+    // number, and 0 is the sentinel the resolver uses for the bundled fallback —
+    // so a plain truthiness filter would silently discard exactly the case worth
+    // reporting. Filter on the type instead.
+    const promptVersions = new Set(
+      obs.map((o) => metadataOf(o).promptVersion).filter((v): v is number => typeof v === "number"),
     );
+    // A turn that ran on the bundled copy: the agent answered, but the prompt is
+    // whatever shipped in the build rather than what is deployed in Langfuse,
+    // and the trace carries no prompt link at all.
+    const fellBack = obs.filter((o) => metadataOf(o).promptIsFallback === true);
     const leaked = obs
       .map((o) => [o.name, secretsIn(o)] as const)
       .filter((entry) => entry[1].length > 0);
@@ -366,12 +422,26 @@ async function main() {
       // Per-user cost and behaviour analysis, and Phase 5 production eval.
       check("userId set", !!root?.userId, root?.userId || "(empty)"),
 
-      // Which instructions produced this answer. Without it, two traces that
+      // Which prompt version produced this answer. Without it, two traces that
       // differ only because the prompt changed are indistinguishable.
       check(
-        "prompt revision recorded",
-        promptRevisions.size > 0,
-        promptRevisions.size ? [...promptRevisions].join(", ") : "no promptRevision in any observation metadata",
+        "prompt version recorded",
+        promptVersions.size > 0,
+        promptVersions.size
+          ? [...promptVersions].map((v) => `v${v}`).join(", ")
+          : "no promptVersion in any observation metadata",
+      ),
+
+      // The fallback keeps the agent answering during a Langfuse outage, which is
+      // correct behaviour — but it must never be the silent steady state. If this
+      // fires, the agent is running the prompt that was compiled into the build,
+      // not the one that is deployed, and no trace can be attributed to a version.
+      check(
+        "no fallback prompt in use",
+        fellBack.length === 0,
+        fellBack.length === 0
+          ? "all observations used a managed prompt"
+          : `${fellBack.length} observation(s) ran on the bundled fallback — check LANGFUSE_BASE_URL/keys`,
       ),
 
       // Asserted on stored data, not on the mask function — a correct mask
@@ -396,15 +466,18 @@ async function main() {
     // backfilled and IS asserted below; cost is derived from it whenever a
     // matching model definition exists, so a null here is a one-time config
     // task in Langfuse (scripts/provision-model-prices.ts), not lost data.
-    const priced = generations.filter((g) => typeof g.totalPrice === "number" && g.totalPrice > 0);
+    // `totalCost`, not `totalPrice`. The API has no `totalPrice` field, so this read
+    // was always undefined and the check reported "cost NOT calculated" while Langfuse
+    // was pricing every generation correctly. Third wrong-field-name in this file.
+    const priced = generations.filter((g) => typeof g.totalCost === "number" && g.totalCost > 0);
     if (priced.length === generations.length && generations.length > 0) {
-      const total = priced.reduce((sum, g) => sum + (g.totalPrice ?? 0), 0);
+      const total = priced.reduce((sum, g) => sum + (g.totalCost ?? 0), 0);
       note("cost calculated", `${priced.length}/${generations.length} generations, total ≈ ${total.toFixed(6)}`);
     } else {
       note(
         "cost NOT calculated",
         `${priced.length}/${generations.length} generations priced — add a model definition matching ` +
-          `"${generations.find((g) => !g.modelId)?.name ?? "the deployment name"}" ` +
+          `"${generations.find((g) => !g.model)?.model ?? "the deployment name"}" ` +
           "(npm run provision:prices). Token usage is unaffected.",
       );
     }

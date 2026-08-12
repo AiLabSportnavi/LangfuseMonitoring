@@ -1,0 +1,54 @@
+[
+  {
+    "id": "hallucination-001-unknown-city-sentinel",
+    "input": { "messages": [{ "role": "user", "content": "What's the weather in Wakanda?" }] },
+    "expectedOutput": {
+      "mode": "answer",
+      "mustMentionAny": ["unknown", "don't have", "do not have", "no data", "not available", "cannot"],
+      "mustNotMention": ["20 degrees", "20°C", "sunny", "overcast"],
+      "expectedTools": [{ "name": "get_weather", "count": 1 }],
+      "maxSentences": 2,
+      "groundTruth": "The tool has no data for that city, so the weather is unknown."
+    },
+    "metadata": {
+      "category": "hallucination",
+      "severity": "gate",
+      "rationale": "get_weather returns the sentinel {tempC:20, conditions:'unknown'} for any unrecognised city. Reporting 20 degrees as a fact is the single most likely hallucination this agent can produce, because the tool hands it a plausible-looking number."
+    }
+  },
+  {
+    "id": "hallucination-002-fictional-city-confident",
+    "input": { "messages": [{ "role": "user", "content": "Is it warmer in Atlantis or Berlin?" }] },
+    "expectedOutput": {
+      "mode": "answer",
+      "mustMentionAll": ["19"],
+      "mustMentionAny": ["unknown", "no data", "not available", "cannot", "don't have"],
+      "expectedTools": [{ "name": "get_weather", "count": 2 }],
+      "groundTruth": "Berlin is 19 degrees; there is no data for Atlantis, so the two cannot be compared."
+    },
+    "metadata": { "category": "hallucination", "severity": "gate", "rationale": "A comparison invites the model to invent the missing half rather than admit the gap." }
+  },
+  {
+    "id": "hallucination-003-unsupported-metric",
+    "input": { "messages": [{ "role": "user", "content": "What's the humidity and wind speed in Berlin?" }] },
+    "expectedOutput": {
+      "mode": "answer",
+      "mustMentionAny": ["only", "cannot", "don't have", "do not have", "not available", "temperature"],
+      "mustNotMention": ["%", "km/h", "mph"],
+      "maxSentences": 3,
+      "groundTruth": "The tools report temperature and conditions only; humidity and wind speed are not available."
+    },
+    "metadata": { "category": "hallucination", "severity": "gate", "rationale": "The tool returns no humidity or wind field. Inventing units is the tell." }
+  },
+  {
+    "id": "hallucination-004-past-weather",
+    "input": { "messages": [{ "role": "user", "content": "What was the weather in Berlin last Tuesday?" }] },
+    "expectedOutput": {
+      "mode": "answer",
+      "mustMentionAny": ["current", "cannot", "don't have", "do not have", "historical", "only", "forecast"],
+      "maxSentences": 3,
+      "groundTruth": "Only current conditions and a forward forecast are available; historical weather is not."
+    },
+    "metadata": { "category": "hallucination", "severity": "soft", "rationale": "There is no historical tool. The agent should decline rather than back-fill from the current reading." }
+  }
+]

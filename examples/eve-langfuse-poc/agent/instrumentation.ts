@@ -30,6 +30,7 @@ import { registerOTel } from "@vercel/otel";
 import { defineInstrumentation } from "eve/instrumentation";
 
 import { LangfuseWorkflowEnricher } from "./enrich-spans.js";
+import { peekResolvedPrompt } from "./lib/prompt.ts";
 
 /**
  * Prints each span's name, id, parent id, and attribute keys. Enable with
@@ -264,8 +265,11 @@ export default defineInstrumentation({
       ],
     });
 
+    // The real OTLP path is /api/public/otel/v1/traces — the exporter appends
+    // /v1/traces. A bare /api/public/otel returns 404, so log the full path to
+    // avoid sending the next reader to a URL that does not exist.
     console.log(
-      `[instrumentation] Langfuse export -> ${baseUrl}/api/public/otel (env=${environment})`,
+      `[instrumentation] Langfuse export -> ${baseUrl}/api/public/otel/v1/traces (env=${environment})`,
     );
   },
 
@@ -302,12 +306,52 @@ export default defineInstrumentation({
       // real deployments should replace those channels per CLAUDE.md §12.2.
       const principal = input.session.auth.current ?? input.session.auth.initiator;
 
+      // Synchronous read of the already-resolved prompt. The instructions
+      // resolver ran at `session.started`, strictly before any step, so the
+      // cache is warm and no fetch happens on this path.
+      const prompt = peekResolvedPrompt();
+
       return {
         runtimeContext: {
           // Groups every turn of one conversation into a Langfuse session.
           "langfuse.session.id": input.session.id,
-          "langfuse.trace.tags": ["poc", "eve", `channel:${input.channel.kind}`],
+          "langfuse.trace.tags": [
+            "poc",
+            "eve",
+            `channel:${input.channel.kind}`,
+            // The ONLY signal that a turn ran on the bundled prompt. Langfuse
+            // cannot tell you this: a fallback prompt is never linked (see
+            // below), so its absence is indistinguishable from a broken link.
+            // A Monitor on this tag is what turns a silent quality regression
+            // into an alert.
+            ...(prompt?.isFallback ? ["prompt-fallback"] : []),
+          ],
           ...(principal?.principalId ? { "langfuse.user.id": principal.principalId } : {}),
+
+          /**
+           * The real prompt→trace link.
+           *
+           * These two attribute names are the v5 mechanism. The `langfusePrompt`
+           * metadata key that Langfuse's own docs recommend for the Vercel AI SDK
+           * is a v3 `LangfuseExporter` convention and does NOT exist anywhere in
+           * `@langfuse/*@5.x` — it silently produces metadata and no link. See
+           * CLAUDE.md §18.1 and docs/INTEGRATION-PITFALLS.md.
+           *
+           * They ride runtime context, so the AI SDK namespaces them to
+           * `ai.settings.context.langfuse.observation.prompt.*` and
+           * `promoteRuntimeContext` in enrich-spans.ts strips the prefix — no new
+           * machinery needed.
+           *
+           * Omitted entirely when serving the fallback: Langfuse drops the link
+           * for `isFallback` prompts anyway, and claiming version 0 exists would
+           * be worse than claiming nothing.
+           */
+          ...(prompt && !prompt.isFallback
+            ? {
+                "langfuse.observation.prompt.name": prompt.name,
+                "langfuse.observation.prompt.version": prompt.version,
+              }
+            : {}),
         },
       };
     },

@@ -1,6 +1,8 @@
 import { defineTool } from "eve/tools";
 import { z } from "zod";
 
+import { CITY_WEATHER, supportedCitiesSentence } from "../lib/cities.ts";
+
 /**
  * A second tool, so a turn can chain tool calls and the trace has to show the
  * order and data flow between them rather than a single isolated call.
@@ -9,21 +11,23 @@ import { z } from "zod";
  * error that is never exercised is an error path that was never verified to be
  * traceable, and "where did it fail" is one of the questions the trace has to
  * answer.
+ *
+ * The supported-city list comes from `../lib/cities.ts`, the same source the system
+ * prompt is compiled from, so the tool's error message and the prompt's claim about
+ * coverage can never contradict each other.
  */
 export default defineTool({
-  description:
-    "Get a multi-day forecast for a city. Only supports Berlin, Hamburg and Munich.",
+  description: `Get a multi-day forecast for a city. Only supports ${supportedCitiesSentence()}.`,
   inputSchema: z.object({
     city: z.string().describe("City name, for example Berlin"),
     days: z.number().int().min(1).max(5).describe("How many days to forecast"),
   }),
   execute: async ({ city, days }) => {
-    const baseline: Record<string, number> = { berlin: 19, hamburg: 17, munich: 23 };
-    const start = baseline[city.toLowerCase()];
+    const start = CITY_WEATHER[city.toLowerCase()]?.tempC;
 
     if (start === undefined) {
       throw new Error(
-        `No forecast coverage for "${city}". Supported cities: Berlin, Hamburg, Munich.`,
+        `No forecast coverage for "${city}". Supported cities: ${supportedCitiesSentence()}.`,
       );
     }
 

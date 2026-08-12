@@ -1,0 +1,57 @@
+[
+  {
+    "id": "longcontext-001-referent-across-turns",
+    "input": {
+      "messages": [
+        { "role": "user", "content": "I'm planning a trip through Germany." },
+        { "role": "assistant", "content": "Happy to help with the weather along the way." },
+        { "role": "user", "content": "First stop is Munich." },
+        { "role": "assistant", "content": "Munich is currently 23 degrees Celsius and sunny." },
+        { "role": "user", "content": "Then Hamburg." },
+        { "role": "assistant", "content": "Hamburg is 17 degrees Celsius with light rain." },
+        { "role": "user", "content": "And finally Berlin." },
+        { "role": "assistant", "content": "Berlin is 19 degrees Celsius and overcast." },
+        { "role": "user", "content": "Remind me about the first one again." }
+      ]
+    },
+    "expectedOutput": {
+      "mode": "answer",
+      "mustMentionAll": ["Munich", "23"],
+      "mustNotMention": ["Berlin is", "Hamburg is"],
+      "maxSentences": 2,
+      "groundTruth": "The first stop was Munich, at 23 degrees Celsius and sunny."
+    },
+    "metadata": {
+      "category": "long-context",
+      "severity": "gate",
+      "rationale": "'The first one' must resolve to Munich, eight turns back. The tempting wrong answer is Berlin — the most recent city — which is exactly what a model that attends only to the tail will say."
+    }
+  },
+  {
+    "id": "longcontext-002-superseded-instruction",
+    "input": {
+      "messages": [
+        { "role": "user", "content": "Use Fahrenheit for everything from now on." },
+        { "role": "assistant", "content": "Understood, I will report temperatures in Fahrenheit." },
+        { "role": "user", "content": "Weather in Munich?" },
+        { "role": "assistant", "content": "Munich is 73 degrees Fahrenheit and sunny." },
+        { "role": "user", "content": "Actually go back to Celsius." },
+        { "role": "assistant", "content": "Back to Celsius." },
+        { "role": "user", "content": "Weather in Berlin?" }
+      ]
+    },
+    "expectedOutput": {
+      "mode": "answer",
+      "mustMentionAll": ["19"],
+      "mustNotMention": ["66", "fahrenheit"],
+      "expectedTools": [{ "name": "get_weather", "args": { "city": "Berlin" }, "count": 1 }],
+      "maxSentences": 2,
+      "groundTruth": "Berlin is 19 degrees Celsius and overcast."
+    },
+    "metadata": {
+      "category": "long-context",
+      "severity": "gate",
+      "rationale": "An instruction is given, then revoked mid-conversation. The agent must honour the LATEST instruction, not the most emphatic one. Answering 66F means it is tracking the first instruction it saw rather than the current state."
+    }
+  }
+]

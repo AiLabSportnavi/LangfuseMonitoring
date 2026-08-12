@@ -3,11 +3,27 @@
     "target": "ES2022",
     "module": "esnext",
     "moduleResolution": "bundler",
+
+    // Every file is a module, even one with no import/export. Without this, TS
+    // classifies such files as global scripts sharing ONE global scope, so
+    // verify-traces.ts and provision-model-prices.ts "redeclare" each other's
+    // top-level `BASE_URL`/`auth` — errors that are pure artefacts of the
+    // classification, not of the code.
+    "moduleDetection": "force",
+
+    // Some modules are imported both by eve's bundler and by bare
+    // `node --experimental-strip-types`, which does not remap `./x.js` onto
+    // `x.ts`. Those imports therefore carry an explicit `.ts`. Safe with
+    // noEmit: nothing here is rewritten for a runtime that would not resolve it.
+    "allowImportingTsExtensions": true,
     "types": ["node"],
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["agent/**/*.ts", "evals/**/*.ts"]
+  // `scripts/**` must be included. It was not, so `tsc --noEmit` silently
+  // typechecked nothing under scripts/ and reported success — the verification
+  // and prompt-sync tooling was entirely unchecked.
+  "include": ["agent/**/*.ts", "evals/**/*.ts", "scripts/**/*.ts"]
 }

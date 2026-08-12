@@ -1,0 +1,33 @@
+[
+  {
+    "id": "missing-001-no-city",
+    "input": { "messages": [{ "role": "user", "content": "What's the weather?" }] },
+    "expectedOutput": {
+      "mode": "clarify",
+      "mustMentionAny": ["which city", "what city", "where"],
+      "forbiddenTools": ["*"],
+      "maxSentences": 2,
+      "groundTruth": "The agent asks which city the user means, and calls no tool."
+    },
+    "metadata": {
+      "category": "missing-info",
+      "severity": "gate",
+      "rationale": "forbiddenTools ['*'] asserts ZERO tool calls. Guessing a default city is the failure mode, and it is invisible in the prose: a confident, well-formed answer to a question nobody asked."
+    }
+  },
+  {
+    "id": "missing-002-forecast-no-days",
+    "input": { "messages": [{ "role": "user", "content": "Give me the forecast for Berlin." }] },
+    "expectedOutput": {
+      "mode": "answer",
+      "mustMentionAny": ["18", "19", "20", "how many days", "days"],
+      "maxToolCalls": 1,
+      "groundTruth": "Either ask how many days, or pick a sensible default and say which was used."
+    },
+    "metadata": {
+      "category": "missing-info",
+      "severity": "soft",
+      "rationale": "days is required with no default. Asking, or choosing and declaring the choice, are both defensible. Choosing silently is not, because the user cannot tell which horizon they were given."
+    }
+  }
+]

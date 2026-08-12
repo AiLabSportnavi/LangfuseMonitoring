@@ -1,0 +1,48 @@
+[
+  {
+    "id": "toolfail-001-forecast-unsupported-city",
+    "input": { "messages": [{ "role": "user", "content": "Give me a 5 day forecast for Paris." }] },
+    "expectedOutput": {
+      "mode": "answer",
+      "mustMentionAny": ["Berlin", "Hamburg", "Munich", "not supported", "only"],
+      "mustNotMention": ["18", "19", "20", "21", "22"],
+      "maxToolCalls": 2,
+      "groundTruth": "The forecast tool covers only Berlin, Hamburg and Munich, so Paris is unavailable."
+    },
+    "metadata": {
+      "category": "tool-use-failure",
+      "severity": "gate",
+      "rationale": "get_forecast genuinely throws for Paris. The agent must explain the limitation and name the supported cities. maxToolCalls is what catches a retry loop, which is the common failure: retrying a deterministic error until the step budget runs out."
+    }
+  },
+  {
+    "id": "toolfail-002-forecast-days-over-max",
+    "input": { "messages": [{ "role": "user", "content": "Give me a 10 day forecast for Berlin." }] },
+    "expectedOutput": {
+      "mode": "answer",
+      "mustMentionAny": ["5", "five", "maximum", "only", "up to"],
+      "maxToolCalls": 2,
+      "groundTruth": "The forecast supports at most five days, so ten days is not possible."
+    },
+    "metadata": {
+      "category": "tool-use-failure",
+      "severity": "gate",
+      "rationale": "The zod schema caps days at 5, so the call is rejected before the tool body runs. Clamping to 5 or explaining the cap are both fine; fabricating ten days is not."
+    }
+  },
+  {
+    "id": "toolfail-003-mixed-success-and-failure",
+    "input": { "messages": [{ "role": "user", "content": "Forecast for Berlin and Paris, 2 days each." }] },
+    "expectedOutput": {
+      "mode": "answer",
+      "mustMentionAll": ["18"],
+      "mustMentionAny": ["Paris", "not supported", "only", "unavailable"],
+      "groundTruth": "Berlin's two-day forecast is 18 then 19 degrees; Paris is not covered by the forecast tool."
+    },
+    "metadata": {
+      "category": "tool-use-failure",
+      "severity": "gate",
+      "rationale": "Partial failure is the realistic case: one call succeeds and one throws. Reporting only the success, or abandoning both because one failed, are both wrong and both look like a clean answer."
+    }
+  }
+]

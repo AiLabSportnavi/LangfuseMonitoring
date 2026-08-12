@@ -1,0 +1,62 @@
+[
+  {
+    "id": "edge-001-empty-message",
+    "input": { "messages": [{ "role": "user", "content": "" }] },
+    "expectedOutput": {
+      "mode": "clarify",
+      "forbiddenTools": ["*"],
+      "maxSentences": 2,
+      "groundTruth": "The agent asks what the user wants, without crashing and without calling a tool."
+    },
+    "metadata": {
+      "category": "edge-case",
+      "severity": "gate",
+      "rationale": "An empty turn must not throw. This is the item the no-crash evaluator exists for: the failure is an exception, not a bad answer."
+    }
+  },
+  {
+    "id": "edge-002-very-long-city-name",
+    "input": { "messages": [{ "role": "user", "content": "What is the weather in Llanfairpwllgwyngyllgogerychwyrndrobwllllantysiliogogogochberlinmunichhamburgnotarealplaceatallbutstillaverylongstringindeedwhichkeepsgoingandgoing?" }] },
+    "expectedOutput": {
+      "mode": "answer",
+      "mustMentionAny": ["unknown", "no data", "not available", "cannot", "don't have", "do not have"],
+      "maxSentences": 3,
+      "groundTruth": "No data exists for that city name, so the weather is unknown."
+    },
+    "metadata": {
+      "category": "edge-case",
+      "severity": "gate",
+      "rationale": "A long string that CONTAINS 'berlin', 'munich' and 'hamburg' as substrings. The tool matches on the whole lowercased name, so it must return the unknown sentinel — a naive substring lookup anywhere in the chain would wrongly answer 19."
+    }
+  },
+  {
+    "id": "edge-003-non-latin-city",
+    "input": { "messages": [{ "role": "user", "content": "Какая погода в Берлине?" }] },
+    "expectedOutput": {
+      "mode": "answer",
+      "mustMentionAny": ["19", "unknown", "no data", "not available", "Berlin"],
+      "maxSentences": 3,
+      "groundTruth": "Either translate to Berlin and report 19 degrees, or state that the city is not recognised. Both are acceptable; crashing or inventing a temperature is not."
+    },
+    "metadata": {
+      "category": "edge-case",
+      "severity": "soft",
+      "rationale": "Cyrillic input. The tool table is keyed on lowercase Latin, so a translated call succeeds and an untranslated one hits the sentinel. Deliberately tolerant of both, because either is defensible."
+    }
+  },
+  {
+    "id": "edge-004-zero-days-forecast",
+    "input": { "messages": [{ "role": "user", "content": "Give me a 0 day forecast for Berlin." }] },
+    "expectedOutput": {
+      "mode": "answer",
+      "mustMentionAny": ["at least", "1", "one", "cannot", "minimum", "how many"],
+      "maxToolCalls": 2,
+      "groundTruth": "The forecast requires at least one day, so zero is not a valid request."
+    },
+    "metadata": {
+      "category": "edge-case",
+      "severity": "soft",
+      "rationale": "days has min(1), so 0 is rejected by the schema. Exercises the boundary below the valid range, where 002 exercises above it."
+    }
+  }
+]

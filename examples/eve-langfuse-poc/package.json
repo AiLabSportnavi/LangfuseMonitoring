@@ -12,10 +12,21 @@
     "start": "eve start",
     "typecheck": "tsc",
     "verify": "node --env-file-if-exists=.env.local --experimental-strip-types scripts/verify-traces.ts",
-    "provision:prices": "node --env-file-if-exists=.env.local --experimental-strip-types scripts/provision-model-prices.ts"
+    "provision:prices": "node --env-file-if-exists=.env.local --experimental-strip-types scripts/provision-model-prices.ts",
+    "prompts:check": "node --env-file-if-exists=.env.local --experimental-strip-types scripts/sync-prompts.ts --check",
+    "prompts:sync": "node --env-file-if-exists=.env.local --experimental-strip-types scripts/sync-prompts.ts",
+    "prompts:promote": "node --env-file-if-exists=.env.local --experimental-strip-types scripts/promote-prompt.ts",
+    "verify:prompt-resolver": "node --env-file-if-exists=.env.local --experimental-strip-types scripts/verify-prompt-resolver.ts",
+    "datasets:check": "node --env-file-if-exists=.env.local --experimental-strip-types scripts/sync-datasets.ts --check",
+    "datasets:sync": "node --env-file-if-exists=.env.local --experimental-strip-types scripts/sync-datasets.ts",
+    "verify:prompt-link": "node --env-file-if-exists=.env.local --experimental-strip-types scripts/verify-prompt-link.ts",
+    "experiment": "node --env-file-if-exists=.env.local --experimental-strip-types evals/experiment.ts",
+    "verify:instructions": "node --env-file-if-exists=.env.local --experimental-strip-types scripts/verify-instruction-layers.ts"
   },
   "dependencies": {
     "@ai-sdk/azure": "^4.0.37",
+    "@ai-sdk/otel": "^1.0.60",
+    "@langfuse/client": "^5.10.0",
     "@langfuse/otel": "^5.10.0",
     "@langfuse/tracing": "^5.10.0",
     "@vercel/connect": "0.4.3",

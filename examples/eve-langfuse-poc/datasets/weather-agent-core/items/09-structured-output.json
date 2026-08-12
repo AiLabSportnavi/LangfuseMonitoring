@@ -1,0 +1,40 @@
+[
+  {
+    "id": "structured-001-three-city-table-fahrenheit",
+    "input": { "messages": [{ "role": "user", "content": "Give me Berlin, Hamburg and Munich as a table, temperature in Fahrenheit." }] },
+    "expectedOutput": {
+      "mode": "answer",
+      "mustMentionAll": ["Berlin", "Hamburg", "Munich", "66", "63", "73"],
+      "mustNotMention": ["19 °F", "17 °F", "23 °F"],
+      "expectedTools": [
+        { "name": "get_weather", "args": { "city": "Berlin" }, "count": 1 },
+        { "name": "get_weather", "args": { "city": "Hamburg" }, "count": 1 },
+        { "name": "get_weather", "args": { "city": "Munich" }, "count": 1 }
+      ],
+      "maxToolCalls": 3,
+      "groundTruth": "Berlin 66F, Hamburg 63F, Munich 73F, presented as a table."
+    },
+    "metadata": {
+      "category": "structured-output",
+      "severity": "gate",
+      "rationale": "Two things at once: three tool calls, and a unit conversion the tools do not perform (19C=66F, 17C=63F, 23C=73F, rounded). The characteristic failure is emitting the Celsius number with an F label, which mustNotMention catches.",
+      "conversionNote": "C*9/5+32 rounded to nearest integer: 19->66.2->66, 17->62.6->63, 23->73.4->73"
+    }
+  },
+  {
+    "id": "structured-002-json-output",
+    "input": { "messages": [{ "role": "user", "content": "Return the current weather for Berlin as JSON with keys city, tempC and conditions. Output only the JSON." }] },
+    "expectedOutput": {
+      "mode": "answer",
+      "mustMentionAll": ["city", "tempC", "conditions", "Berlin", "19", "overcast"],
+      "expectedTools": [{ "name": "get_weather", "args": { "city": "Berlin" }, "count": 1 }],
+      "isJson": true,
+      "groundTruth": "{\"city\":\"Berlin\",\"tempC\":19,\"conditions\":\"overcast\"}"
+    },
+    "metadata": {
+      "category": "structured-output",
+      "severity": "gate",
+      "rationale": "Tests format compliance against a system prompt that says 'answer in one or two short sentences'. The two instructions conflict, and the per-request one should win. isJson is checked by the format-contract evaluator, which tolerates a fenced code block but not prose around it."
+    }
+  }
+]

@@ -40,9 +40,10 @@
  * the single largest storage risk in this design. Bubbling up stores each
  * payload once.
  */
-import { createHash } from "node:crypto";
-
+import type { LangfuseObservationType } from "@langfuse/tracing";
 import type { ReadableSpan, SpanProcessor } from "@opentelemetry/sdk-trace-base";
+
+import { peekResolvedPrompt } from "./lib/prompt.ts";
 
 /** Prefix the AI SDK gives every runtime-context value it puts on a span. */
 const RUNTIME_CONTEXT_PREFIX = "ai.settings.context.";
@@ -52,6 +53,7 @@ const LF = {
   TRACE_INPUT: "langfuse.trace.input",
   TRACE_OUTPUT: "langfuse.trace.output",
   TRACE_METADATA: "langfuse.trace.metadata",
+  OBSERVATION_TYPE: "langfuse.observation.type",
   OBSERVATION_INPUT: "langfuse.observation.input",
   OBSERVATION_OUTPUT: "langfuse.observation.output",
   OBSERVATION_METADATA: "langfuse.observation.metadata",
@@ -70,12 +72,27 @@ const LF = {
  *
  * Order matters: `startsWith` rules are checked after the exact-match rules,
  * first match wins.
+ *
+ * Each rule also declares the Langfuse observation TYPE, because type is what
+ * decides how the node renders: a `tool` node gets its own collapsible block
+ * with the tool name and a status badge, a `generation` node gets the
+ * model/token/cost panel, an `agent` node becomes a node in the Agent Graph,
+ * and everything else falls back to a featureless `span`. Langfuse can infer
+ * the type from `gen_ai.operation.name`, and does so correctly today — but that
+ * inference is a property of the AI SDK's semantic-convention version, not of
+ * our code, so a framework upgrade that renames an operation silently demotes
+ * every tool call to a plain span. Writing the type explicitly costs one
+ * attribute and makes the rendering ours, not the framework's.
  */
-const RENAME_RULES: ReadonlyArray<{ test: (name: string) => boolean; name: string }> = [
-  { test: (n) => n === "ai.eve.turn", name: "process-turn" },
-  { test: (n) => n === "step 1", name: "model-call" },
-  { test: (n) => n.startsWith("invoke_agent "), name: "agent-step" },
-  { test: (n) => n.startsWith("chat "), name: "call-model" },
+const RENAME_RULES: ReadonlyArray<{
+  test: (name: string) => boolean;
+  name: string;
+  type: LangfuseObservationType;
+}> = [
+  { test: (n) => n === "ai.eve.turn", name: "process-turn", type: "span" },
+  { test: (n) => n === "step 1", name: "model-call", type: "span" },
+  { test: (n) => n.startsWith("invoke_agent "), name: "agent-step", type: "agent" },
+  { test: (n) => n.startsWith("chat "), name: "call-model", type: "generation" },
 ];
 
 /**
@@ -97,6 +114,45 @@ function toolSpanName(spanName: string): string | undefined {
   const tool = spanName.slice(EXECUTE_TOOL_PREFIX.length).trim();
   if (!tool) return undefined;
   return `call-${tool.replace(/[\s_]+/g, "-").toLowerCase()}`;
+}
+
+/**
+ * Give Langfuse a payload it can render as an expandable JSON tree rather than
+ * as one long escaped string.
+ *
+ * OTel span attributes may only hold primitives, so every structured payload
+ * reaches Langfuse as a string and Langfuse parses it back. That works — unless
+ * the value is doubly encoded, which is the normal case for tool results: the
+ * tool returns an object, the AI SDK serializes it into the tool-result message
+ * part, and the telemetry layer serializes *that* onto the span. The attribute
+ * then parses to a STRING, and the UI shows `"{\"partnerId\":16499,…}"` as a
+ * single unexpandable blob instead of a tree.
+ *
+ * Unwrapping to the innermost non-string value and re-encoding exactly once
+ * fixes it. Bounded at four rounds so a pathological payload cannot spin, and
+ * only attempted when the text actually looks like JSON — a plain assistant
+ * sentence must stay a sentence, not become a parse attempt.
+ */
+function normalizeJsonPayload(value: unknown): unknown {
+  if (typeof value !== "string") return value === undefined ? undefined : JSON.stringify(value);
+
+  let current: unknown = value;
+  for (let round = 0; round < 4 && typeof current === "string"; round++) {
+    const text = current.trim();
+    const looksLikeJson = /^[[{"]/.test(text);
+    if (!looksLikeJson) break;
+    try {
+      const parsed: unknown = JSON.parse(text);
+      if (parsed === current) break; // JSON.parse('"x"') === 'x' would loop
+      current = parsed;
+    } catch {
+      break; // not JSON after all — keep the last good value
+    }
+  }
+
+  // A payload that unwrapped to a bare string is text, and text renders better
+  // as text than as a quoted JSON scalar.
+  return typeof current === "string" ? current : JSON.stringify(current);
 }
 
 interface CapturedIO {
@@ -129,11 +185,6 @@ function parentIdOf(span: ReadableSpan): string | undefined {
 
 function hrToMs([seconds, nanos]: [number, number]): number {
   return seconds * 1000 + nanos / 1e6;
-}
-
-/** Short, stable content fingerprint — changes iff the instructions do. */
-function shortHash(value: unknown): string {
-  return createHash("sha256").update(JSON.stringify(value)).digest("hex").slice(0, 10);
 }
 
 /**
@@ -185,7 +236,20 @@ export class LangfuseWorkflowEnricher implements SpanProcessor {
   /** traceId -> every error seen anywhere in the trace so far, root included. */
   private readonly errorsByTraceId = new Map<string, RecoveredError[]>();
 
-  constructor(private readonly options: EnricherOptions) {}
+  private readonly options: EnricherOptions;
+
+  /** Per-trace session/user/tags, collected from children and applied to the root. */
+  private readonly traceIdentity = new Map<string, Record<string, unknown>>();
+
+  // Written out longhand rather than as a `constructor(private readonly options)`
+  // parameter property. This module is imported by `evals/otel.ts`, which runs under
+  // bare `node --experimental-strip-types` — strip-only mode ERASES types but cannot
+  // SYNTHESISE the assignment a parameter property implies, so it rejects the file
+  // outright (ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX). eve's bundler compiles properly and
+  // accepts either form, which is why this only breaks outside eve.
+  constructor(options: EnricherOptions) {
+    this.options = options;
+  }
 
   onStart(): void {}
 
@@ -197,8 +261,13 @@ export class LangfuseWorkflowEnricher implements SpanProcessor {
     // signal that this span IS eve's turn wrapper. See correctAppRoot below.
     const isTurnRoot = span.name === "ai.eve.turn";
 
-    this.renameForReadability(span);
+    this.renameAndType(span, attrs);
     this.promoteRuntimeContext(attrs);
+    // AFTER renameAndType: it decides the observation type, and the prompt link
+    // is only honoured on generations.
+    this.attachPromptLink(attrs);
+    this.attachModelInfo(attrs);
+    this.rememberTraceIdentity(span, attrs);
     this.fillInputOutput(span, attrs);
     this.attachMetadata(span, attrs);
     this.recordError(span);
@@ -209,6 +278,77 @@ export class LangfuseWorkflowEnricher implements SpanProcessor {
     // of trace-level output.
     this.markFinalAnswer(span, attrs);
     this.recordForParent(span, attrs);
+  }
+
+  /**
+   * Stamp the managed-prompt link onto GENERATION spans.
+   *
+   * WHY THIS CANNOT BE DONE FROM RUNTIME CONTEXT
+   *
+   * `instrumentation.ts` puts the prompt name/version into eve's runtime context,
+   * and `promoteRuntimeContext` duly promotes them — but runtime context lands on
+   * the AGENT-level span (`invoke_agent` -> `agent-step`), and OTel span
+   * attributes are NOT inherited by child spans. The generation (`chat` ->
+   * `call-model`) is a child, so it never saw them.
+   *
+   * That matters because Langfuse honours the prompt link on **generations only**
+   * (per the OTLP attribute mapping table in the integration docs). So the
+   * attribute was present on the trace, on the wrong span, and linked nothing:
+   * the observation carried `langfuse.observation.prompt.name` in its metadata
+   * passthrough while `promptName` stayed empty.
+   *
+   * Writing it here, per-span, is the only placement that satisfies both
+   * constraints. The value comes from the shared prompt cache rather than from
+   * the span, so it is identical across every generation of the turn.
+   *
+   * Version MUST be an integer — the mapping table specifies `integer`, and a
+   * stringified version is silently ignored.
+   */
+  /**
+   * Publish the model name explicitly on generations.
+   *
+   * Langfuse infers a model from `gen_ai.request.model` well enough to price the
+   * call — cost lands correctly — but the observation's own `providedModelName`
+   * stays empty, so the UI shows an anonymous LLM call and "group by model" finds
+   * nothing. `langfuse.observation.model.name` is the first-choice attribute in the
+   * OTLP mapping table, so setting it removes the ambiguity rather than relying on
+   * inference that is a property of the AI SDK's semantic-convention version.
+   *
+   * Also promotes model PARAMETERS, which nothing else sets, so the UI can show what
+   * temperature/max-tokens produced a given answer.
+   */
+  private attachModelInfo(attrs: Record<string, unknown>): void {
+    if (attrs[LF.OBSERVATION_TYPE] !== "generation") return;
+
+    const model = attrs["gen_ai.request.model"] ?? attrs["gen_ai.response.model"];
+    if (typeof model === "string" && model.length > 0) {
+      attrs["langfuse.observation.model.name"] ??= model;
+    }
+
+    if (attrs["langfuse.observation.model.parameters"] === undefined) {
+      const parameters: Record<string, unknown> = {};
+      for (const [key, value] of Object.entries(attrs)) {
+        // `gen_ai.request.model` is the model itself, not a parameter.
+        if (!key.startsWith("gen_ai.request.") || key === "gen_ai.request.model") continue;
+        parameters[key.slice("gen_ai.request.".length)] = value;
+      }
+      if (Object.keys(parameters).length > 0) {
+        attrs["langfuse.observation.model.parameters"] = JSON.stringify(parameters);
+      }
+    }
+  }
+
+  private attachPromptLink(attrs: Record<string, unknown>): void {
+    if (attrs["langfuse.observation.type"] !== "generation") return;
+
+    const prompt = peekResolvedPrompt();
+    // A fallback prompt is deliberately not linked: version 0 does not exist in
+    // Langfuse, and Langfuse's own SDK drops the link for fallbacks too. The
+    // `prompt-fallback` trace tag is the signal for that case.
+    if (!prompt || prompt.isFallback) return;
+
+    attrs["langfuse.observation.prompt.name"] = prompt.name;
+    attrs["langfuse.observation.prompt.version"] = prompt.version;
   }
 
   /**
@@ -225,10 +365,35 @@ export class LangfuseWorkflowEnricher implements SpanProcessor {
    * `readonly` on `ReadableSpan` only at the TS level — the same trick this
    * class already relies on for `attributes` mutation.
    */
-  private renameForReadability(span: ReadableSpan): void {
-    const renamed = RENAME_RULES.find((r) => r.test(span.name))?.name ?? toolSpanName(span.name);
+  private renameAndType(span: ReadableSpan, attrs: Record<string, unknown>): void {
+    const rule = RENAME_RULES.find((r) => r.test(span.name));
+
+    /**
+     * Tool spans are matched on the `gen_ai.tool.name` ATTRIBUTE first, and only
+     * then on the `execute_tool <name>` span-name convention.
+     *
+     * Under eve the tool span is named plainly `get_weather`, while the AI SDK
+     * outside eve names it `execute_tool get_weather`. Matching only the latter
+     * left eve's tool spans unrenamed and untyped — they showed up as
+     * `get_weather` instead of `call-get-weather`, which breaks the stable-name
+     * allowlist and, more importantly, splits Agent Graph nodes between the two
+     * spellings. The attribute is set in both cases, so it is the reliable signal.
+     */
+    const toolAttr = attrs["gen_ai.tool.name"];
+    const toolName = rule
+      ? undefined
+      : typeof toolAttr === "string" && toolAttr.length > 0
+        ? `call-${toolAttr.replace(/[\s_]+/g, "-").toLowerCase()}`
+        : toolSpanName(span.name);
+
+    const renamed = rule?.name ?? toolName;
     if (!renamed) return;
     (span as unknown as { name: string }).name = renamed;
+
+    // `??=` so a span that already declared its own type — anything created
+    // through `@langfuse/tracing` helpers, e.g. a `retriever` sub-step inside a
+    // tool — keeps it. This only fills in the framework-generated spans.
+    attrs[LF.OBSERVATION_TYPE] ??= rule?.type ?? "tool";
   }
 
   /**
@@ -260,12 +425,12 @@ export class LangfuseWorkflowEnricher implements SpanProcessor {
         attrs["gen_ai.input.messages"] ??
         attrs["gen_ai.tool.call.arguments"] ??
         attrs["gen_ai.system_instructions"];
-      if (own !== undefined) attrs[LF.OBSERVATION_INPUT] = own;
+      if (own !== undefined) attrs[LF.OBSERVATION_INPUT] = normalizeJsonPayload(own);
     }
 
     if (attrs[LF.OBSERVATION_OUTPUT] === undefined) {
       const own = attrs["gen_ai.output.messages"] ?? attrs["gen_ai.tool.call.result"];
-      if (own !== undefined) attrs[LF.OBSERVATION_OUTPUT] = own;
+      if (own !== undefined) attrs[LF.OBSERVATION_OUTPUT] = normalizeJsonPayload(own);
     }
 
     // A step that threw has no output — but "it failed, and this is why" is an
@@ -312,19 +477,23 @@ export class LangfuseWorkflowEnricher implements SpanProcessor {
       status: span.status.code === 2 ? "ERROR" : "OK",
     };
 
-    // The system instructions live on the "agent-step" (invoke_agent) span,
-    // not the nested "call-model" generation, so this only appears one level
-    // up from the raw model call — that is also the node a reviewer expands
-    // first to see "what did the agent have to work with".
+    // Prompt provenance in metadata, alongside — not instead of — the real
+    // Langfuse prompt link.
     //
-    // This is NOT a Langfuse-managed prompt link (`OBSERVATION_PROMPT_NAME` /
-    // `_VERSION`, which point at a real versioned Prompt object in Langfuse).
-    // Creating that object requires the admin API, which is allowlist-gated
-    // and unreachable from where this was built — see
-    // docs/INTEGRATION-PITFALLS.md #16. A content hash is the honest interim:
-    // it answers "did the instructions change between these two traces?"
-    // without claiming a link that would 404 in the UI.
-    const systemInstructions = pick("gen_ai.system_instructions");
+    // The link itself is carried by the `langfuse.observation.prompt.name` and
+    // `.version` attributes stamped in instrumentation.ts, which make the prompt
+    // a clickable, versioned object in the UI and drive Langfuse's per-version
+    // metrics. This block is the human-readable copy: it survives in metadata
+    // where it can be read without a join, records the LABEL (which the link
+    // does not carry), and — most importantly — records `promptIsFallback`,
+    // which is the only in-trace evidence that a turn ran on the bundled copy.
+    //
+    // Superseded: this used to publish a content hash of `gen_ai.system_instructions`
+    // under `promptRevision`, because creating a real Prompt object needed an API
+    // that was unreachable at the time. Both halves of that constraint are gone —
+    // the prompt is managed (prompts/weather-assistant.text.json) and the read
+    // APIs are reachable from any network since the SSO cut-over.
+    const linkedPrompt = peekResolvedPrompt();
 
     const optional: Record<string, unknown> = {
       model: pick("gen_ai.request.model"),
@@ -340,8 +509,15 @@ export class LangfuseWorkflowEnricher implements SpanProcessor {
       eveChannel: pick("eve.channel.kind"),
       eveVersion: pick("eve.version"),
       environment: this.options.environment,
-      ...(systemInstructions !== undefined
-        ? { promptName: "weather-assistant-instructions", promptRevision: shortHash(systemInstructions) }
+      ...(linkedPrompt
+        ? {
+            promptName: linkedPrompt.name,
+            promptLabel: linkedPrompt.label,
+            promptVersion: linkedPrompt.version,
+            // Always emitted, including when false. A key that only appears on
+            // failure is a key nobody writes an assertion against.
+            promptIsFallback: linkedPrompt.isFallback,
+          }
         : {}),
     };
 
@@ -425,8 +601,39 @@ export class LangfuseWorkflowEnricher implements SpanProcessor {
    * original PoC run (recorded root was `invoke_agent`, never the true turn
    * root, and session id still landed).
    */
+  /**
+   * Remember session/user per trace, and stamp them onto the root.
+   *
+   * eve's runtime context is applied to the MODEL-CALL spans, and OTel attributes
+   * are not inherited, so the turn-root span (`process-turn`) never carries
+   * `langfuse.session.id` or `langfuse.user.id`. Langfuse reads trace-level
+   * identity from the root observation, so Sessions and Users stayed empty in the
+   * UI even though every generation underneath had the values — the data was in the
+   * trace, on the wrong span.
+   *
+   * Children always end before their parent, so by the time the root ends every
+   * child has already passed through here and the memo is populated.
+   */
+  private rememberTraceIdentity(span: ReadableSpan, attrs: Record<string, unknown>): void {
+    const traceId = span.spanContext().traceId;
+    const memo = this.traceIdentity.get(traceId) ?? {};
+    for (const key of ["langfuse.session.id", "langfuse.user.id", "langfuse.trace.tags"] as const) {
+      const value = attrs[key];
+      if (value !== undefined && memo[key] === undefined) memo[key] = value;
+    }
+    this.traceIdentity.set(traceId, memo);
+  }
+
   private markRoot(span: ReadableSpan, attrs: Record<string, unknown>): void {
     if (attrs[LF.IS_APP_ROOT] !== true) return;
+
+    // Apply whatever identity the children carried. `??=` so a value already on the
+    // root always wins.
+    const memo = this.traceIdentity.get(span.spanContext().traceId) ?? {};
+    for (const [key, value] of Object.entries(memo)) attrs[key] ??= value;
+    // The turn is over; drop the memo so a long-lived server does not accumulate one
+    // entry per trace forever.
+    this.traceIdentity.delete(span.spanContext().traceId);
 
     attrs[LF.TRACE_NAME] ??= this.options.traceName;
     if (attrs[LF.TRACE_INPUT] === undefined && attrs[LF.OBSERVATION_INPUT] !== undefined) {

@@ -1,0 +1,82 @@
+[
+  {
+    "id": "normal-001-berlin-current",
+    "input": { "messages": [{ "role": "user", "content": "What's the weather in Berlin?" }] },
+    "expectedOutput": {
+      "mode": "answer",
+      "mustMentionAll": ["19"],
+      "mustMentionAny": ["overcast", "cloud"],
+      "mustNotMention": ["tomorrow", "forecast"],
+      "expectedTools": [{ "name": "get_weather", "args": { "city": "Berlin" }, "count": 1 }],
+      "forbiddenTools": ["get_forecast"],
+      "maxSentences": 2,
+      "groundTruth": "Berlin is currently 19 degrees Celsius and overcast."
+    },
+    "metadata": { "category": "normal", "severity": "gate", "rationale": "Baseline single-tool happy path. If this breaks, nothing else matters." }
+  },
+  {
+    "id": "normal-002-munich-current",
+    "input": { "messages": [{ "role": "user", "content": "How warm is it in Munich right now?" }] },
+    "expectedOutput": {
+      "mode": "answer",
+      "mustMentionAll": ["23"],
+      "mustMentionAny": ["sunny", "sun"],
+      "expectedTools": [{ "name": "get_weather", "args": { "city": "Munich" }, "count": 1 }],
+      "maxSentences": 2,
+      "groundTruth": "Munich is currently 23 degrees Celsius and sunny."
+    },
+    "metadata": { "category": "normal", "severity": "gate", "rationale": "Same shape as 001 with different phrasing, to catch overfitting to one question form." }
+  },
+  {
+    "id": "normal-003-two-cities",
+    "input": { "messages": [{ "role": "user", "content": "Compare the weather in Munich and Hamburg." }] },
+    "expectedOutput": {
+      "mode": "answer",
+      "mustMentionAll": ["23", "17"],
+      "expectedTools": [
+        { "name": "get_weather", "args": { "city": "Munich" }, "count": 1 },
+        { "name": "get_weather", "args": { "city": "Hamburg" }, "count": 1 }
+      ],
+      "maxToolCalls": 2,
+      "groundTruth": "Munich is 23 and sunny; Hamburg is 17 with light rain, so Munich is warmer."
+    },
+    "metadata": { "category": "normal", "severity": "gate", "rationale": "The prompt says call the tool once per city. Two cities must mean exactly two calls, not one and a guess." }
+  },
+  {
+    "id": "normal-004-berlin-forecast-3d",
+    "input": { "messages": [{ "role": "user", "content": "Give me the next 3 days for Berlin." }] },
+    "expectedOutput": {
+      "mode": "answer",
+      "mustMentionAll": ["18", "19", "20"],
+      "expectedTools": [{ "name": "get_forecast", "args": { "city": "Berlin", "days": 3 }, "count": 1 }],
+      "maxToolCalls": 1,
+      "groundTruth": "Berlin's next three days are 18, 19 and 20 degrees Celsius."
+    },
+    "metadata": { "category": "normal", "severity": "gate", "rationale": "Exercises the second tool and the days argument. Values are computed from the tool's own formula: 19+((i%3)-1)." }
+  },
+  {
+    "id": "normal-005-hamburg-rain-question",
+    "input": { "messages": [{ "role": "user", "content": "Do I need an umbrella in Hamburg?" }] },
+    "expectedOutput": {
+      "mode": "answer",
+      "mustMentionAny": ["rain", "umbrella", "yes"],
+      "expectedTools": [{ "name": "get_weather", "args": { "city": "Hamburg" }, "count": 1 }],
+      "maxSentences": 2,
+      "groundTruth": "Yes — Hamburg currently has light rain, so an umbrella is sensible."
+    },
+    "metadata": { "category": "normal", "severity": "soft", "rationale": "Indirect question: the answer requires interpreting conditions rather than reciting them." }
+  },
+  {
+    "id": "normal-006-celsius-default",
+    "input": { "messages": [{ "role": "user", "content": "Temperature in Berlin?" }] },
+    "expectedOutput": {
+      "mode": "answer",
+      "mustMentionAll": ["19"],
+      "mustNotMention": ["fahrenheit", "66", "°F"],
+      "expectedTools": [{ "name": "get_weather", "args": { "city": "Berlin" }, "count": 1 }],
+      "maxSentences": 2,
+      "groundTruth": "Berlin is 19 degrees Celsius."
+    },
+    "metadata": { "category": "normal", "severity": "gate", "rationale": "Celsius is the documented default. A prompt edit that drops the unit rule shows up here." }
+  }
+]
