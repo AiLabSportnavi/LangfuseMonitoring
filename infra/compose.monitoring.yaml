@@ -197,9 +197,32 @@ services:
       # Flipping to true before roles are assigned locks out everyone at once.
       GF_AUTH_AZUREAD_ROLE_ATTRIBUTE_STRICT: ${GRAFANA_SSO_ROLE_STRICT:-false}
       # Lets the GrafanaAdmin app role grant server-admin, so admin rights are
-      # managed in Entra rather than locally. Without it the only server admin is
-      # the break-glass local account.
-      GF_AUTH_AZUREAD_ALLOW_ASSIGN_GRAFANA_ADMIN: "true"
+      # managed in Entra rather than locally.
+      #
+      # ⚠️ ONLY MEANINGFUL IF THE APP REGISTRATION DEFINES APP ROLES. When it
+      # does not, this is actively harmful: Grafana still treats the Grafana
+      # Admin flag as directory-managed and LOCKS it in the UI ("Synced via
+      # AzureAD", no Change button), while the roles claim that would set it
+      # never arrives. The result is an install where nobody can be made admin
+      # by any route — observed here on 2026-08-12.
+      #
+      # The registration in use (shared with "n8n Automation") has appRoles: []
+      # and groupMembershipClaims: None, so no roles claim is emitted at all.
+      GF_AUTH_AZUREAD_ALLOW_ASSIGN_GRAFANA_ADMIN: ${GRAFANA_SSO_ASSIGN_ADMIN:-true}
+      # Same lock, applied to the ORG role. With role sync on and no app roles,
+      # every SSO identity is pinned to auto_assign_org_role (Viewer) forever.
+      #
+      # Setting this true hands role management to Grafana instead of Entra.
+      # It costs NO security: authentication remains entirely Entra-gated, so
+      # revoking a user in the directory still removes their access. Only the
+      # ROLE lives locally. The trade is that a role change is made in two
+      # places rather than one — acceptable versus adding app roles to a
+      # registration shared with another application, which would inject a
+      # roles claim into that application's tokens (docs/GRAFANA-SSO.md §2).
+      #
+      # Revert to false once Grafana has its OWN registration with the four app
+      # roles from docs/GRAFANA-SSO.md §3.6.
+      GF_AUTH_AZUREAD_SKIP_ORG_ROLE_SYNC: ${GRAFANA_SSO_SKIP_ORG_ROLE_SYNC:-false}
       GF_AUTH_AZUREAD_USE_PKCE: "true"
       # THE BREAK-GLASS SWITCH. While false, the local admin login form stays
       # available alongside SSO. Do not set this true until an Entra login has
