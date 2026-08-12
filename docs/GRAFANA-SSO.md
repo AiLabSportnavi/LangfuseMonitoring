@@ -3,7 +3,10 @@
 Puts the monitoring UI behind the same directory as Langfuse, so access is granted and
 revoked in one place instead of by sharing a password.
 
-**Status: prepared, not enabled.** Every variable ships defaulted to off. Until
+**Status: ENABLED and enforcing as of 2026-08-12.** SSO is the only authenticator: the
+login form and HTTP Basic are both disabled, and `ADMIN_ALLOWLIST` has been removed (§8).
+The text below describing the disabled-by-default state is retained as the enablement
+procedure. Every variable ships defaulted to off. Until
 `GRAFANA_SSO_ENABLED=true` is set in `infra/.env`, Grafana behaves exactly as it did
 before this document existed. Enabling is an `.env` change plus a container recreate — no
 code change, no image change.
@@ -202,15 +205,50 @@ reason the local admin account stays.
 
 ---
 
-## 8. What SSO does not replace
+## 8. `ADMIN_ALLOWLIST` is gone — superseded 2026-08-12
 
-`ADMIN_ALLOWLIST` in the Caddyfile stays. SSO is identity; the allowlist is network reach,
-and `CLAUDE.md` §12.1 puts the UI behind VPN/allowlist regardless of who is authenticating.
-The two answer different questions and the second one still limits what an attacker with a
-stolen session cookie can even connect to.
+> An earlier version of this section said the allowlist stays. **That decision was taken
+> separately, as this section required, and it was reversed.** The allowlist no longer exists
+> anywhere in the deployment.
 
-Relaxing the allowlist because SSO is now in place is a deliberate policy decision, not a
-consequence of this change. If it is taken, take it separately and record the reasoning.
+The reasoning, recorded as §8 asked:
+
+1. **It was standing in for authentication.** With Grafana's only other credential being one
+   shared local password, network position *was* the access control — not a second layer over
+   identity. That is the arrangement this cut-over exists to end.
+2. **It contained a dynamic residential IP.** A rotation locks the operator out of the
+   dashboards and hands allowlisted reach to whoever inherits the address.
+3. **It contained `172.16.0.0/12` and the box's own public IP** — extending trust to every
+   container on the host and to any SSRF primitive reachable from one.
+
+What replaces it is identity, enforced on two independent settings that must both hold:
+`signInAudience=AzureADMyOrg` on the registration, and
+`GF_AUTH_AZUREAD_ALLOWED_ORGANIZATIONS` pinned to the tenant id.
+
+### The part that is easy to get wrong
+
+Disabling the login form is **not** sufficient. `GF_AUTH_DISABLE_LOGIN_FORM` removes the HTML
+form only; Grafana's **HTTP Basic** authenticator is separate and defaults to enabled.
+Verified live on 2026-08-12, with the form already disabled:
+
+```
+curl -u admin:<password> https://deploy-ui.sportnavi.de/api/user
+→ 200 {"login":"admin","isGrafanaAdmin":true,...}
+```
+
+A wrong password returned 401, so the credential was genuinely being checked — a fully
+working password path behind a UI that advertised none. **SSO-only requires both**
+`GRAFANA_DISABLE_LOGIN_FORM=true` and `GRAFANA_BASIC_AUTH_ENABLED=false`.
+
+Post-cut-over, the same two probes return `400 auth.client.notConfigured` and `401`.
+
+### What is genuinely lost
+
+The allowlist did limit what an attacker holding a stolen session cookie could connect to.
+That mitigation is gone, and the compensating controls are TLS, the Entra tenant lock,
+Grafana's own session expiry, and the `/login*` rate limit in the Caddyfile. If a stronger
+network boundary is ever wanted, the answer is a VPN or an identity-aware proxy — **not** a
+list of IP addresses maintained by hand.
 
 ---
 
