@@ -246,11 +246,25 @@ docker exec "${PROJECT}-ch" clickhouse-client \
 # data actually is, and cannot be defeated by one table happening to be empty.
 # It compares against the live server, so it also catches a PARTIAL restore,
 # which a fixed threshold never would.
-LIVE_ROWS=$($COMPOSE exec -T clickhouse clickhouse-client \
-  --user "$CLICKHOUSE_USER" --password "$CLICKHOUSE_PASSWORD" \
-  --query "SELECT sum(rows) FROM system.parts WHERE database='default' AND active" \
-  2>/dev/null | tr -d '[:space:]' || echo 0)
-[ -n "$LIVE_ROWS" ] || LIVE_ROWS=0
+# Resolved by compose label rather than via a $COMPOSE helper: this script
+# otherwise never touches the live stack (it runs a fully isolated environment
+# on its own network), so it deliberately carries no compose context. An
+# earlier revision referenced $COMPOSE here and, under `set -u`, that aborted
+# the comparison and left LIVE_ROWS=0 — which silently disabled the very
+# safety check this block exists to perform.
+LIVE_CH=$(docker ps -q \
+  --filter "label=com.docker.compose.project=langfuse" \
+  --filter "label=com.docker.compose.service=clickhouse" | head -1)
+LIVE_ROWS=0
+if [ -n "$LIVE_CH" ]; then
+  LIVE_ROWS=$(docker exec "$LIVE_CH" clickhouse-client \
+    --user "$CLICKHOUSE_USER" --password "$CLICKHOUSE_PASSWORD" \
+    --query "SELECT sum(rows) FROM system.parts WHERE database='default' AND active" \
+    2>/dev/null | tr -d '[:space:]' || echo 0)
+else
+  log "WARN: live ClickHouse container not found — restored rows cannot be compared against production"
+fi
+case "$LIVE_ROWS" in ''|*[!0-9]*) LIVE_ROWS=0 ;; esac
 
 REST_ROWS=$(docker exec "${PROJECT}-ch" clickhouse-client \
   --user "$CLICKHOUSE_USER" --password "$CLICKHOUSE_PASSWORD" \
