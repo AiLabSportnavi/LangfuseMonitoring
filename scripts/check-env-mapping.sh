@@ -46,6 +46,22 @@ if [ $# -eq 0 ] && [ -f "infra/compose.monitoring.yaml" ]; then
   search_files+=("infra/compose.monitoring.yaml")
 fi
 
+# ── Also search the operational scripts ───────────────────────────────────────
+# compose is not the only legitimate consumer of infra/.env. scripts/backup.sh
+# and scripts/restore-test.sh source the same file and read BACKUP_ENCRYPTION_KEY,
+# BACKUP_DIR, BACKUP_RETENTION_DAYS and BACKUP_REMOTE from it.
+#
+# Without this, those keys are reported as orphans the moment backups are
+# configured — three FAILs for correctly-wired variables. That is the failure
+# mode DEPLOYMENT-PITFALLS.md warns about repeatedly: a checker that cannot see
+# a consumer reports "unused" when it means "I did not look there", and a suite
+# that cries wolf gets ignored on the day it is right.
+if [ $# -eq 0 ]; then
+  for s in scripts/*.sh; do
+    [ -f "$s" ] && [ "$s" != "scripts/check-env-mapping.sh" ] && search_files+=("$s")
+  done
+fi
+
 # Keys that are deliberately not consumed by any service.
 #   COMPOSE_*        - read by the docker compose CLI itself, never by a service
 #   *_ALLOWLIST etc. - templated into config files rather than passed as env
