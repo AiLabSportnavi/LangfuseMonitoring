@@ -50,11 +50,18 @@
 # Caddy is the ONLY ingress. Nothing else publishes a host port, which is what
 # keeps Postgres, ClickHouse, Valkey and MinIO off the public internet.
 #
-# The split below is a security boundary, not just a routing convenience:
+# The Langfuse site block below is public in its entirety. That is deliberate:
 # telemetry ingest must be public because Vercel serverless functions have no
-# static egress IPs outside Enterprise Secure Compute, so they cannot be
-# IP-allowlisted. The admin surface has no such constraint and must not inherit
-# that exposure.
+# static egress IPs outside Enterprise Secure Compute, and the same is true of
+# GitHub-hosted CI runners calling the prompt/dataset/score APIs. Access control
+# is therefore per-project API keys for /api/public/*, and Entra ID SSO
+# (single-tenant) for the UI and admin routes — never network position.
+#
+# ADMIN_ALLOWLIST NO LONGER EXISTS anywhere in this file. Grafana was its last
+# consumer and now carries Entra ID SSO of its own, so IP-based trust has been
+# removed from the deployment entirely rather than kept alive for one surface.
+# Do not reintroduce it on either block — see the note on the Grafana block for
+# what replaced it and why network position was the wrong control.
 {$LANGFUSE_DOMAIN} {
 	encode gzip
 
@@ -78,7 +85,24 @@
 
 	# ── PUBLIC: telemetry ingest ────────────────────────────────────────────
 	# Protected by TLS + per-project API keys, never by network position.
-	@ingest path /api/public/otel* /api/public/ingestion*
+	# Enumerated, not prefix-globbed (audit F-17). `/api/public/otel*` also
+	# matched `/api/public/otelXYZ` and every future sibling under that prefix,
+	# so a new Langfuse endpoint would silently inherit this block's treatment
+	# without anyone reviewing it. The OTLP signal paths are a stable, published
+	# contract, so they can simply be named.
+	#
+	# ⚠️ The real path is /api/public/otel/v1/traces. A bare POST to
+	# /api/public/otel returns 404 — verified against the live 4.6.0 instance,
+	# CLAUDE.md §6.1. The old wildcard hid that; this matcher does not, which is
+	# a feature: a canary or exporter pointed at the bare path now fails at the
+	# edge instead of looking accepted.
+	#
+	# FAILURE MODE IF LANGFUSE ADDS A SIGNAL PATH: it falls through to the
+	# catch-all handle at the bottom, which also proxies to web:3000. So ingest
+	# keeps WORKING — it just loses the 10MB body cap and this rate-limit zone
+	# until the path is added here. Degraded protection, never an outage. That
+	# is the right way round, and it is why enumerating is safe.
+	@ingest path /api/public/otel/v1/traces /api/public/otel/v1/logs /api/public/otel/v1/metrics /api/public/ingestion
 	handle @ingest {
 		request_body {
 			# Bounds accidental telemetry floods and malformed payloads. Deep
@@ -98,7 +122,7 @@
 		# project's flood spreads across keys and each stays under the limit.
 		# Per-project keying needs {header.Authorization} — that is the API
 		# secret, so it must never be combined with `log_key`. Deferred until
-		# the volume measurement, and tracked in docs/SECURITY-REVIEW.md.
+		# the volume measurement, and tracked as F-13 in docs/AUDIT-2026-08-12.md.
 		rate_limit {
 			zone ingest {
 				key {remote_host}
@@ -122,24 +146,35 @@
 		reverse_proxy web:3000
 	}
 
-	# ── RESTRICTED: UI, admin, and every other route ────────────────────────
-	# remote_ip matches the direct peer, not X-Forwarded-For. trusted_proxies is
-	# deliberately not configured: Caddy is the edge here, and trusting XFF from
-	# private ranges would let a spoofed header bypass this allowlist.
-	@trusted remote_ip {$ADMIN_ALLOWLIST}
-	handle @trusted {
+	# ── IDENTITY-GATED: UI, admin, REST API, and every other route ──────────
+	# Public by design. Access control is IDENTITY (Entra ID SSO, single-tenant)
+	# for the UI, and per-project API KEYS for /api/public/*. It is deliberately
+	# NOT network position.
+	#
+	# ADMIN_ALLOWLIST used to gate this block. It was removed because the
+	# operator's entry was a dynamic residential IP: a rotation locked out the
+	# UI, the REST API and the MCP endpoint simultaneously, and handed
+	# allowlisted admin reach to whichever ISP customer inherited the address.
+	# Identity does not rotate out from under you.
+	#
+	# Justified by Langfuse's own guidance: the langfuse/langfuse container is
+	# designed to be exposed publicly, has undergone penetration testing, and is
+	# the same image serving Langfuse Cloud.
+	#
+	# This ALSO unblocks the evaluation layer: agents on Vercel and GitHub-hosted
+	# CI runners reach /api/public/v2/prompts, /datasets, /scores and /v2/metrics
+	# with keys alone. Neither has static egress IPs, so under the old allowlist
+	# neither could — see docs/INTEGRATION-PITFALLS.md #16.
+	#
+	# There is exactly ONE catch-all handle here, and it proxies. Do not add a
+	# trailing `handle { respond 403 }` back: with the catch-all proxying, a
+	# leftover deny handler would black-hole the entire UI.
+	handle {
 		route {
-			# Brute-force protection for the auth surface. This is the
-			# precondition for removing ADMIN_ALLOWLIST: once the UI is reachable
+			# Brute-force protection for the auth surface. With the UI reachable
 			# without network restriction, /api/auth/* is the exposed surface
-			# that matters most.
-			#
-			# It lives INSIDE this handler, scoped by `match`, rather than in its
-			# own `handle @auth` block earlier in the file. That is deliberate:
-			# handle blocks are mutually exclusive and evaluated in order, so a
-			# separate auth block would match before @trusted and make
-			# /api/auth/* publicly reachable immediately — exposing the login
-			# surface before the step-6 cut-over is ready for it.
+			# that matters most, so this is a precondition of the design above
+			# rather than a nice-to-have.
 			#
 			# 30/min per IP: a browser SSO round trip makes several calls
 			# (providers, csrf, callback, session), so a tighter limit would
@@ -158,28 +193,43 @@
 			reverse_proxy web:3000
 		}
 	}
-
-	# Deny by default. This handler must never proxy — if it did, the entire
-	# admin surface would be public.
-	handle {
-		respond "Not authorized" 403
-	}
 }
 
-# ── RESTRICTED: Grafana ─────────────────────────────────────────────────────
+# ── IDENTITY-GATED: Grafana ─────────────────────────────────────────────────
 # A separate site block, not a subpath on the Langfuse domain. That is deliberate.
 #
 # A /grafana subpath would have to be matched AHEAD of the Langfuse site's
-# deny-by-default `handle`, and handle blocks are mutually exclusive and evaluated
-# in order — the same hazard documented at length around the /api/auth/* rate
-# limiter above. Getting that order wrong exposes an admin surface. A separate
-# site block cannot make that mistake, and it also avoids Grafana's
-# serve_from_sub_path, which rewrites every asset URL and breaks subtly.
+# handlers, and handle blocks are mutually exclusive and evaluated in order — the
+# same hazard documented at length around the /api/auth/* rate limiter above.
+# Getting that order wrong exposes an admin surface. A separate site block cannot
+# make that mistake, and it also avoids Grafana's serve_from_sub_path, which
+# rewrites every asset URL and breaks subtly.
 #
-# Two independent controls, matching CLAUDE.md §12.1's treatment of admin
-# surfaces: the same ADMIN_ALLOWLIST that gates the Langfuse UI, AND Grafana's own
-# login. Neither alone is sufficient — the allowlist is coarse (an IP, not a
-# person) and Grafana's login is only as good as its password.
+# ── WHY THERE IS NO ALLOWLIST HERE ANY MORE ─────────────────────────────────
+# This block used to be gated by ADMIN_ALLOWLIST. That gate was removed, and the
+# reasoning is the same one already applied to the Langfuse block above:
+#
+#   1. It did not work. An audit on 2026-08-12 reached Grafana's /api/health from
+#      an arbitrary internet client and got {"database":"ok","version":"13.0.6"}
+#      back — while this file said the surface was gated and the config test
+#      suite passed. Text in a config file is not a control.
+#   2. The list contained a DYNAMIC RESIDENTIAL IP. On rotation the operator
+#      loses the dashboards, and whichever ISP customer inherits the address
+#      gains whatever trust the list confers.
+#   3. It also contained the box's own public IP and the whole 172.16.0.0/12
+#      Docker range — granting admin trust to every container on the host and to
+#      any SSRF primitive reachable from it.
+#
+# Access control is now IDENTITY: Microsoft Entra ID, single-tenant. The lock is
+# two settings that must BOTH hold — the app registration's
+# signInAudience=AzureADMyOrg, and GF_AUTH_AZUREAD_ALLOWED_ORGANIZATIONS pinned
+# to the tenant id (compose.monitoring.yaml). Entra has no allowed-domains
+# concept, so neither alone is sufficient.
+#
+# Grafana runs SSO-ONLY (GF_AUTH_DISABLE_LOGIN_FORM=true), so there is no
+# password form on the internet at all. Break-glass is not a tunnel — that flag
+# removes the form on every interface — it is SSH + flipping the variable +
+# recreating the container. See docs/GRAFANA-SSO.md §9.
 #
 # REQUIRES a DNS A record for this name pointing at the box, or ACME cannot issue
 # a certificate and Caddy will retry the challenge indefinitely at startup.
@@ -212,14 +262,28 @@
 	# X-Frame-Options is deliberately NOT set to DENY here, unlike the Langfuse
 	# block. Grafana renders its own panels in iframes; DENY breaks them.
 	# SAMEORIGIN gives the clickjacking protection without the breakage.
-	header X-Frame-Options "SAMEORIGIN"
+	#
+	# The `>` is REQUIRED and is not cosmetic. Grafana sets its own
+	# `X-Frame-Options: deny` upstream. Without the replacement operator Caddy
+	# APPENDS, and the response carries the header twice with conflicting
+	# values — which browsers treat as invalid and several ignore entirely,
+	# silently dropping the very protection this line exists to provide.
+	# Verified live on 2026-08-12: both headers were present. Audit finding F-15.
+	header >X-Frame-Options "SAMEORIGIN"
 
-	@trusted remote_ip {$ADMIN_ALLOWLIST}
-	handle @trusted {
+	# ── Single catch-all. Identity is the control, not network position. ─────
+	# There is exactly ONE handle here and it proxies. Do not add a
+	# `handle { respond 403 }` alongside it: handle blocks are mutually
+	# exclusive and evaluated in order, so a leftover deny handler would
+	# black-hole Grafana entirely. Same trap as the Langfuse block above.
+	handle {
 		route {
-			# Grafana's login is the exposed credential surface once the
-			# allowlist is eventually relaxed, exactly as /api/auth/* is for
-			# Langfuse. Same reasoning, same order of magnitude.
+			# Brute-force protection for the credential surface. Retained even
+			# though the local login form is disabled: /login is also where the
+			# SSO redirect and the OAuth callback (/login/azuread) land, and an
+			# unthrottled OAuth callback is an open invitation to code-exchange
+			# spam. 30/min per IP passes a normal browser round trip — several
+			# calls — while sitting orders of magnitude below any attack.
 			rate_limit {
 				zone grafana_login {
 					match {
@@ -232,9 +296,5 @@
 			}
 			reverse_proxy grafana:3000
 		}
-	}
-
-	handle {
-		respond "Not authorized" 403
 	}
 }

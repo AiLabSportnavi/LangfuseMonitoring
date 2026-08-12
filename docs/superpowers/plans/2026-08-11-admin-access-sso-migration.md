@@ -1,6 +1,6 @@
 # Plan — Replace `ADMIN_ALLOWLIST` with SSO + domain lock
 
-**Date:** 2026-08-11 · **Provider:** Microsoft Entra ID · **Review:** [SECURITY-REVIEW.md](../../SECURITY-REVIEW.md)
+**Date:** 2026-08-11 · **Provider:** Microsoft Entra ID · **Review:** [SECURITY-REVIEW-2026-08-11.md](../../archive/SECURITY-REVIEW-2026-08-11.md) (archived)
 
 **Status:** Phase 2 (rate limiting) implemented in-repo, not deployed. Phase 1 wiring in
 place with empty defaults — inert until the Entra credentials from Step 1 are supplied.

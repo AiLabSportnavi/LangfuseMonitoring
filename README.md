@@ -343,7 +343,8 @@ Stock Caddy has no rate limiting; `rate_limit` is a third-party module compiled 
 per-project throttling. Vercel functions egress from many rotating IPs, so one project's
 flood spreads across keys. Per-project keying would require using the `Authorization`
 header as the key — that value is the API secret, so it must never be logged. Tracked in
-[`docs/SECURITY-REVIEW.md`](docs/SECURITY-REVIEW.md).
+[`docs/AUDIT-2026-08-12.md`](docs/AUDIT-2026-08-12.md) and
+[`docs/SECURITY-CHECKLIST.md`](docs/SECURITY-CHECKLIST.md).
 
 `remote_ip` matches the direct peer, not `X-Forwarded-For`. `trusted_proxies` is
 deliberately not configured: Caddy is the edge, and trusting a forwarded header would let
@@ -619,5 +620,7 @@ retention.
 | [`docs/RUNBOOK-onboarding.md`](docs/RUNBOOK-onboarding.md) | Adding a new agent project |
 | [`docs/DEPLOYMENT-PITFALLS.md`](docs/DEPLOYMENT-PITFALLS.md) | Infrastructure failures, diagnosed to root cause |
 | [`docs/INTEGRATION-PITFALLS.md`](docs/INTEGRATION-PITFALLS.md) | Agent and tracing integration failures |
-| [`docs/SECURITY-REVIEW.md`](docs/SECURITY-REVIEW.md) | Security findings and open items |
+| [`docs/AUDIT-2026-08-12.md`](docs/AUDIT-2026-08-12.md) | Current security findings and remediation status |
+| [`docs/SECURITY-CHECKLIST.md`](docs/SECURITY-CHECKLIST.md) | Re-runnable verification — behavioural, not config-reading |
+| [`docs/archive/`](docs/archive/) | Superseded reviews, kept because their finding IDs are cited elsewhere |
 | [`docs/SERVER-HANDOFF-SSO.md`](docs/SERVER-HANDOFF-SSO.md) | SSO migration procedure and gates |

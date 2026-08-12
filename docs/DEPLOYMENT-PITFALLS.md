@@ -706,6 +706,103 @@ production credential. `test-secret-hygiene.sh` passed throughout — it asserte
 
 ---
 
+## 20. Auth.js reports "password login disabled" in a header, not the body
+
+**Found:** 2026-08-12, writing `scripts/test-exposure.sh` for audit F-06.
+
+The check for "is password login actually disabled" reads the response to a CSRF-token POST
+against `/api/auth/callback/credentials`. The first version read the response **body** and
+reported:
+
+```
+FAIL  password login was NOT refused. Response:
+```
+
+— an empty string. The server was refusing correctly the entire time. The refusal is a `302`
+whose `Location` carries the reason, URL-encoded:
+
+```
+HTTP/1.1 302 Found
+Location: https://…/api/auth/error?error=Sign%20in%20with%20email%20and%20password%20is%20disabled%20for%20this%20instance.%20Please%20use%20SSO.
+```
+
+`curl` without `-D -` sees an empty body and concludes nothing, which the script then reported
+as a security failure.
+
+**Fix:** read the `Location` header, decode `%20`, and distinguish the two error values that
+matter — they mean opposite things:
+
+| `error=` value | Meaning |
+|---|---|
+| `Sign in with email and password is disabled…` | provider **off**. Correct. |
+| `CredentialsSignin` | provider **LIVE** — it accepted the attempt and rejected the password |
+
+**Why this belongs beside pitfall #11.** That entry records that `/api/auth/providers` listing
+`credentials` is *not* evidence of enforcement. This is the same trap from the other side: the
+POST *is* the right test, but only if you read the right part of the response. The 2026-08-12
+audit got this wrong in both directions on the same control — first claiming password login was
+enabled (from the providers endpoint), then having to withdraw it.
+
+**Rule:** for any check whose verdict is "refused" vs "accepted", print the raw evidence while
+developing it. An empty body is not a negative result; it is no result.
+
+---
+
+## 21. A container memory limit on Valkey silently destroys the ingestion queue
+
+**Found:** 2026-08-12, adding resource limits for the audit's E8 finding.
+
+Adding `deploy.resources.limits.memory` to the Valkey service looks like pure defence — it stops
+one container starving the box. On the service holding the **ingestion queue** it is the opposite,
+because of how it interacts with `--maxmemory-policy noeviction`:
+
+- With **no** `--maxmemory`, Valkey has no internal ceiling. It grows until it hits the *container*
+  limit, and the kernel OOM-kills it. **The entire queue vanishes at once**, with no application
+  error anywhere — the process simply restarts empty.
+- With `--maxmemory` set **below** the container limit, Valkey refuses writes when it fills.
+  Producers get explicit errors, the eviction and memory panels move, and the failure is bounded
+  and visible.
+
+**Fix:** the two must always ship together, with `--maxmemory` the smaller. `compose.yaml` sets
+`--maxmemory ${REDIS_MAXMEMORY:-6gb}` against an 8G container limit, and
+`scripts/test-compose-config.sh` fails if a memory policy is present without a ceiling.
+
+**The general shape:** a resource limit is safe on a *stateless* service and dangerous on one
+holding un-replicated state, because the enforcement mechanism differs — the app refuses work, or
+the kernel kills the process. Ask which one you are getting before adding the limit.
+
+---
+
+## 22. `set -e` plus a failing command substitution exits a script silently
+
+**Found:** 2026-08-12, writing `scripts/check-config-drift.sh`.
+
+```bash
+CADDY="$(find_container 'caddy')"    # grep exits 1 when nothing matches
+```
+
+Under `set -euo pipefail`, a command substitution that fails **inside an assignment** aborts the
+script. Run where the stack was absent, the script produced **no output at all** and exit 1. Not
+one diagnostic line — it died on line 69 of 180.
+
+Two distinct bugs, and the second is worse:
+
+1. `grep` needs `|| true` when "no match" is a legitimate answer.
+2. **A run that verified nothing was reporting a verdict.** After fixing (1), the script cheerfully
+   printed `PASS: no drift detected` having checked zero things, because every container was
+   missing and every check had been *skipped*.
+
+**Fix:** count assertions that actually executed, and report `INCONCLUSIVE` with exit 2 when the
+count is zero. Skipped is not passed.
+
+**Why this matters here specifically:** this is the same failure the audit's F-06 describes — six
+config tests reporting green against an open surface. A verification script that cannot distinguish
+"I checked and it is fine" from "I could not check" is not a weaker control than none, it is a
+worse one, because it manufactures confidence. Pitfall #16–18 record three earlier variants; this
+is the fourth.
+
+---
+
 ## Diagnostic checklist
 
 When a service will not start, in this order:

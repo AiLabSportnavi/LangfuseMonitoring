@@ -20,3 +20,8 @@
 node_modules/
 .DS_Store
 backups/
+
+# Prometheus file_sd targets are DEPLOYMENT STATE, not configuration: they hold
+# the real public hostnames of a specific deployment. The .example stays
+# tracked; the live file does not. See infra/prometheus/targets/README.md.
+infra/prometheus/targets/edge.json

@@ -1,0 +1,94 @@
+# Dependency update detection. Audit finding F-10.
+#
+# The pinning discipline in this repo is excellent — every image carries an
+# explicit tag with a written rationale, never `latest`. Pinning is only half a
+# control though: without a detection mechanism you are pinned to whatever was
+# current on the day of deployment, indefinitely, including straight through a
+# future CVE. At the time of the audit the platform was 3 minor versions behind
+# on Langfuse and 1 behind on Grafana, and nothing would ever have said so.
+#
+# ⚠️ THIS OPENS PULL REQUESTS. IT DOES NOT DEPLOY ANYTHING.
+# CLAUDE.md §14 requires human review for majors, and §15 lists major Langfuse
+# upgrades among the actions that always need judgement. Auto-merge is
+# deliberately not configured here.
+#
+# ⚠️ AND DO NOT TAKE THE LANGFUSE 4.6.0 → 4.9.0 PR UNTIL BACKUPS ARE PROVEN.
+# That upgrade crosses ClickHouse schema migrations, which CLAUDE.md §14
+# identifies as the risky, often irreversible part — rollback is not safe across
+# one. Close the loop with scripts/backup.sh AND a passing
+# scripts/restore-test.sh first, or there is nothing to roll back to.
+version: 2
+updates:
+  # ── Docker images in the compose files ────────────────────────────────────
+  - package-ecosystem: docker
+    directory: /infra
+    schedule:
+      interval: weekly
+      day: monday
+      time: "06:00"
+      timezone: Etc/UTC
+    open-pull-requests-limit: 5
+    labels: [dependencies, infra]
+    commit-message:
+      prefix: "chore(deps)"
+    # Grouped so a routine week produces one reviewable PR rather than eight
+    # that each need the same smoke test.
+    groups:
+      monitoring-stack:
+        patterns:
+          - "prom/*"
+          - "grafana/*"
+          - "gcr.io/cadvisor/*"
+          - "prometheuscommunity/*"
+          - "oliver006/*"
+      datastores:
+        patterns:
+          - "postgres"
+          - "clickhouse/*"
+          - "valkey/*"
+          - "minio/*"
+    ignore:
+      # Langfuse web and worker MUST be upgraded together and only through the
+      # flow in CLAUDE.md §14. A grouped or automatic bump here could land a
+      # version skew between the two, which is not a supported configuration.
+      # Track those releases by hand until a staging environment exists.
+      - dependency-name: "langfuse/langfuse"
+      - dependency-name: "langfuse/langfuse-worker"
+      # ClickHouse majors can carry irreversible schema migrations. Minor and
+      # patch only; a major is a planned project, not a PR to review on Monday.
+      - dependency-name: "clickhouse/clickhouse-server"
+        update-types: ["version-update:semver-major"]
+
+  # ── The custom Caddy build ────────────────────────────────────────────────
+  - package-ecosystem: docker
+    directory: /infra/caddy
+    schedule:
+      interval: weekly
+    labels: [dependencies, infra, security]
+    commit-message:
+      prefix: "chore(deps)"
+
+  # ── The Eve agent PoC ─────────────────────────────────────────────────────
+  # `npm audit` was clean at the audit, across 126 resolved dependencies. This
+  # is what keeps it that way rather than making it true once.
+  - package-ecosystem: npm
+    directory: /examples/eve-langfuse-poc
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    labels: [dependencies, agent]
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      langfuse-sdk:
+        patterns:
+          - "@langfuse/*"
+
+  # ── The workflows below ───────────────────────────────────────────────────
+  # A pinned action with a known vulnerability is a supply-chain hole in the
+  # thing that validates everything else.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    labels: [dependencies, ci]

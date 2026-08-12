@@ -52,5 +52,32 @@ if [ -n "$published" ]; then
   echo "FAIL: these services publish host ports and must not: $published"; fail=1
 fi
 
+# ── Audit F-02: the org-creation boundary must be wired through ─────────────
+# Presence in the rendered config only. The VALUE lives in infra/.env and is
+# deployment-specific, and an empty value is the dangerous case — Langfuse reads
+# unset as "any authenticated user may create an organisation", which is not the
+# same as nobody.
+#
+# ⚠️ This asserts the variable is PLUMBED, not that it is populated on the
+# server. Whether the running container actually holds a non-empty value is
+# scripts/check-config-drift.sh's job, and only that one can answer it.
+echo "$rendered" | grep -q "LANGFUSE_ALLOWED_ORGANIZATION_CREATORS" \
+  || { echo "FAIL: LANGFUSE_ALLOWED_ORGANIZATION_CREATORS is not passed to web (F-02)"; fail=1; }
+
+# ── Audit E8/F-09: container hardening must not silently regress ────────────
+echo "$rendered" | grep -q "no-new-privileges:true" \
+  || { echo "FAIL: no service sets no-new-privileges"; fail=1; }
+echo "$rendered" | grep -q "memory:" \
+  || { echo "FAIL: no resource limits — a runaway container can starve ClickHouse"; fail=1; }
+
+# Valkey holds the ingestion queue under noeviction. A container memory limit
+# WITHOUT a lower --maxmemory means the kernel OOM-kills it and the entire queue
+# is lost silently, instead of Valkey refusing writes loudly. The two must
+# always ship together.
+if echo "$rendered" | grep -q "maxmemory-policy"; then
+  echo "$rendered" | grep -q -- "--maxmemory$" || echo "$rendered" | grep -q -- "- --maxmemory" \
+    || { echo "FAIL: Valkey has a memory policy but no --maxmemory ceiling"; fail=1; }
+fi
+
 [ $fail -eq 0 ] && echo "PASS: compose stack valid"
 exit $fail

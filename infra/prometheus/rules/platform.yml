@@ -1,0 +1,190 @@
+# Platform alerting. Audit finding F-12.
+#
+# ── What is in here, and what is deliberately not ─────────────────────────────
+#
+# Only rules that are TRUE OR FALSE INDEPENDENT OF A BASELINE. Everything whose
+# correct value depends on this platform's real traffic — queue depth
+# thresholds, ingestion rate floors, latency budgets — is still deferred, for
+# the reason CLAUDE.md §10.3 gives: a guessed threshold trains a channel to
+# ignore alerts, and an ignored channel is worse than no alerting.
+#
+# The rules below qualify because each describes a fact or a projection rather
+# than a chosen level:
+#
+#   · a target is down                    — fact
+#   · a probe fails                       — fact
+#   · Valkey evicted a key                — fact, and under noeviction it is
+#                                           supposed to be impossible
+#   · the disk will fill within N days    — a PROJECTION from observed slope,
+#                                           which is exactly what CLAUDE.md
+#                                           §10.1 asks for instead of a static
+#                                           percentage
+#   · the queue is growing monotonically  — a shape, not a level (§11.2: "a
+#                                           small but steadily growing queue
+#                                           needs immediate action")
+#
+# When the 2–4 week baseline exists, add the calibrated threshold rules from
+# docs/OPERATIONS.md §2 alongside these — do not replace them.
+#
+# ⚠️ ROUTING IS STILL REQUIRED. These rules fire in Prometheus' own UI. Until
+# Alertmanager is configured in compose.monitoring.yaml and pointed at a channel
+# someone reads, nothing pages. Rules without routing are a half-built control,
+# and this file is not the finished article.
+groups:
+  - name: availability
+    rules:
+      - alert: TargetDown
+        expr: up == 0
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Prometheus target {{ $labels.job }}/{{ $labels.instance }} is down"
+          description: >-
+            The scrape has failed for 5 minutes. If this is the langfuse web or
+            worker target, ingestion is affected; if it is an exporter, the
+            monitoring blind spot is the thing to fix.
+
+      - alert: LangfuseEndpointDown
+        # Probed on the container network, bypassing Caddy and TLS. That means
+        # this alert says "the application is broken", not "the edge is broken" —
+        # a TLS, DNS or Caddy failure is INVISIBLE here by design. The off-host
+        # external monitor (OPERATIONS.md §5) is what covers that, and this rule
+        # is not a substitute for it.
+        expr: probe_success{job="langfuse-endpoints"} == 0
+        for: 3m
+        labels:
+          severity: emergency
+        annotations:
+          summary: "Langfuse endpoint probe failing: {{ $labels.instance }}"
+          description: >-
+            The application is not answering on the container network. Agents
+            are best-effort and will not fail (CLAUDE.md requirement 10), but
+            telemetry is being dropped for the duration.
+
+  - name: capacity
+    rules:
+      - alert: DiskWillFillWithin14Days
+        # THE alert on this box. CLAUDE.md §10.1 names ClickHouse disk
+        # exhaustion as the primary risk and asks explicitly for projected
+        # days-until-full rather than a current percentage — a static "80% full"
+        # fires too late on a large disk and too often on a small one.
+        #
+        # predict_linear over 6h extrapolates the observed slope forward 14 days.
+        # 14 days is chosen to be longer than any plausible response: it is
+        # enough time to prune retention, add a disk, or move a tier without
+        # working a weekend.
+        expr: >-
+          predict_linear(node_filesystem_avail_bytes{fstype!~"tmpfs|overlay",mountpoint="/"}[6h], 14 * 24 * 3600) < 0
+        for: 1h
+        labels:
+          severity: warning
+          component: clickhouse
+        annotations:
+          summary: "Disk projected to fill within 14 days"
+          description: >-
+            At the growth rate observed over the last 6 hours, {{ $labels.mountpoint }}
+            runs out inside 14 days. When it does, ingestion stops. Check the
+            ClickHouse capacity dashboard, then consider retention, TTLs, or the
+            Tier 2 trigger in CLAUDE.md §8.7.
+          runbook: "docs/OPERATIONS.md §2"
+
+      - alert: DiskWillFillWithin48Hours
+        expr: >-
+          predict_linear(node_filesystem_avail_bytes{fstype!~"tmpfs|overlay",mountpoint="/"}[1h], 48 * 3600) < 0
+        for: 15m
+        labels:
+          severity: emergency
+          component: clickhouse
+        annotations:
+          summary: "Disk projected to fill within 48 hours"
+          description: >-
+            Act now. When this disk fills, ClickHouse stops accepting writes and
+            ingestion stops with it. A shorter 1h window is used here on purpose:
+            this is meant to catch a sudden change in slope, not a slow trend.
+          runbook: "docs/OPERATIONS.md §2"
+
+  - name: ingestion
+    rules:
+      - alert: ValkeyEvictedKeys
+        # Valkey runs --maxmemory-policy noeviction precisely BECAUSE it holds
+        # the ingestion queue. A non-zero eviction counter is therefore not a
+        # performance note — it is silent queue-data loss, and it means the
+        # policy is not what this stack believes it is.
+        expr: increase(redis_evicted_keys_total[15m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+          component: valkey
+        annotations:
+          summary: "Valkey evicted keys — queued events are being lost"
+          description: >-
+            maxmemory-policy should be noeviction, which makes this impossible.
+            Either the policy is not applied on the running container or memory
+            pressure is being handled in a way that discards queued events.
+            Check the policy first, then memory headroom against the
+            1GB-per-100k-events/min rule (CLAUDE.md §8.5).
+
+      - alert: WorkerQueueGrowingSteadily
+        # Shape, not level (CLAUDE.md §11.2). A large but DRAINING queue is
+        # recovering from a spike and needs nothing; a small but steadily
+        # GROWING queue is a forming throughput deficit and needs action. This
+        # rule encodes that distinction rather than picking a depth number
+        # nobody has measured yet.
+        #
+        # 1h of sustained positive derivative filters out normal burstiness.
+        expr: >-
+          deriv(sum(redis_key_size{key=~"bull:.*:wait"})[30m:]) > 0
+          and sum(redis_key_size{key=~"bull:.*:wait"}) > 1000
+        for: 1h
+        labels:
+          severity: warning
+          component: worker
+        annotations:
+          summary: "Worker queue depth growing for over an hour"
+          description: >-
+            Waiting jobs have risen monotonically for an hour and depth is
+            non-trivial. Scale worker containers first (CLAUDE.md §8.5). If it
+            keeps growing after scaling, workers are NOT the bottleneck — look at
+            ClickHouse write latency, S3 throttling, or Redis CPU.
+          runbook: "docs/OPERATIONS.md §3"
+
+      - alert: WorkerQueueMetricsMissing
+        # The specific silent failure REDIS_QUEUE_KEY_PATTERNS causes: a wrong
+        # BullMQ prefix produces no error, just empty panels — which read as an
+        # idle, healthy queue. Without this rule, the most important signal in
+        # the stack can be absent indefinitely and look fine.
+        expr: absent(redis_key_size{key=~"bull:.*:wait"})
+        for: 30m
+        labels:
+          severity: warning
+          component: worker
+        annotations:
+          summary: "No worker queue metrics — the queue panels are blind, not idle"
+          description: >-
+            redis_key_size for bull:*:wait does not exist. Almost always a wrong
+            REDIS_QUEUE_KEY_PATTERNS. Run scripts/discover-queue-keys.sh against
+            the live Valkey and set what it prints. Do not read the empty
+            dashboard as a healthy queue.
+
+  - name: certificates
+    rules:
+      - alert: TLSCertificateExpiringSoon
+        # Caddy renews automatically, so this fires only when renewal is BROKEN
+        # — which is the case worth paging for. 21 days leaves room for several
+        # failed ACME attempts before anything user-visible happens.
+        #
+        # Requires a blackbox https probe of the public hostname. If that job is
+        # not configured this rule is inert, which is why scripts/health-check.sh
+        # also checks expiry independently (audit F-14).
+        expr: (probe_ssl_earliest_cert_expiry - time()) / 86400 < 21
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "TLS certificate for {{ $labels.instance }} expires in under 21 days"
+          description: >-
+            Caddy should have renewed this already. Check its logs for ACME
+            failures — a challenge that cannot complete (missing DNS record,
+            port 80 blocked) retries silently until the certificate expires and
+            every agent's export starts failing TLS verification at once.

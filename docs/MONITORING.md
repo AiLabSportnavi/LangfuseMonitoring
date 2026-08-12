@@ -51,10 +51,10 @@ So Langfuse-specific signals are **derived from the components around it**:
 
 ### 2.1 Why throughput is measured at ClickHouse, not at the edge
 
-`POST /api/public/ingestion` returns **207 — queued, not stored** (`OPERATIONS.md` §1). A perfectly
-healthy 207 rate at the edge is therefore entirely compatible with a completely backlogged pipeline
-persisting nothing. Counting requests would measure optimism; counting rows inserted into ClickHouse
-measures what happened. Same reasoning as the ingestion canary.
+Ingest accepts on **enqueue, not on store** (`OPERATIONS.md` §1). A perfectly healthy acceptance rate
+at the edge is therefore entirely compatible with a completely backlogged pipeline persisting nothing.
+Counting requests would measure optimism; counting rows inserted into ClickHouse measures what
+happened. Same reasoning as the ingestion canary.
 
 ---
 
@@ -248,7 +248,7 @@ plausibly change a decision.
   eventually. But the only per-project identifier available at the Caddy layer is the `Authorization`
   header — **which is the API secret.** Putting it in a metric label writes project secrets into the
   TSDB and onto every dashboard. Deferred to the same work that fixes per-project rate limiting;
-  tracked in [`SECURITY-REVIEW.md`](SECURITY-REVIEW.md).
+  tracked in [`AUDIT-2026-08-12.md`](AUDIT-2026-08-12.md) as F-13.
 - **Langfuse's internal OTel traces.** `OTEL_EXPORTER_OTLP_ENDPOINT` could point at a collector, but
   that is application tracing, not infrastructure monitoring, and would need a collector plus a trace
   backend.

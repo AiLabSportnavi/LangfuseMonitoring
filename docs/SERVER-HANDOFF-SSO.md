@@ -1,7 +1,7 @@
 # Server handoff — deploy Entra SSO + rate limiting
 
 **For:** an agent operating on the Hetzner host (`5.9.95.174`, `/root/LangfuseMonitoring`)
-**Prepared:** 2026-08-11 · **Background:** [SECURITY-REVIEW.md](SECURITY-REVIEW.md) ·
+**Prepared:** 2026-08-11 · **Background:** [archive/SECURITY-REVIEW-2026-08-11.md](archive/SECURITY-REVIEW-2026-08-11.md) (archived) ·
 [migration plan](superpowers/plans/2026-08-11-admin-access-sso-migration.md)
 
 You are deploying a change to how the Langfuse **admin UI** is protected. Read this

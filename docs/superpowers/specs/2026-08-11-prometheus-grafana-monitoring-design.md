@@ -193,7 +193,7 @@ performance note, it is silent queue-data loss.
   right thing eventually, but the only per-project identifier available at the Caddy layer is the
   `Authorization` header — which **is the API secret**. Putting it in a metric label would write
   project secrets into the TSDB and onto every dashboard. Deferred to the same work that fixes
-  per-project rate limiting, and tracked in `docs/SECURITY-REVIEW.md`.
+  per-project rate limiting, and tracked in `docs/AUDIT-2026-08-12.md` as F-13.
 - **Langfuse's internal OTel traces.** `OTEL_EXPORTER_OTLP_ENDPOINT` could point at a collector,
   but that is application tracing, not infrastructure monitoring, and it would need a collector
   plus a trace backend. Out of scope; §17's "do not block, do not implement" rule applies.

@@ -20,11 +20,15 @@ Confirmed against current Langfuse documentation. Re-verify before relying on an
 | `GET /api/public/health` | 200 healthy / 503 unhealthy. Checks API only by default. |
 | `GET /api/public/health?failIfDatabaseUnavailable=true` | Also fails on DB unreachable. **Use this for deep checks.** |
 | `GET /api/public/ready` | 200 ready / **500 after SIGTERM/SIGINT**. Use as the readiness probe so traffic drains on graceful shutdown. |
-| `POST /api/public/ingestion` | **Returns 207**, asynchronous. A 207 means *queued*, not *stored*. |
-| `POST /api/public/otel` | OTLP ingest. Basic auth + `x-langfuse-ingestion-version: 4`. |
+| `POST /api/public/otel/v1/traces` | **The trace ingest path.** Basic auth + `x-langfuse-ingestion-version: 4`. Note the full path — a bare `POST /api/public/otel` returns **404**. |
+| `POST /api/public/ingestion` | **`events_only` mode on this server:** accepts **score and log** events, **rejects `trace-create`**. Asynchronous — acceptance means *queued*, not *stored*. |
+| `GET /api/public/v2/observations` | Read-back path for the canary. The v3 endpoints (`/api/public/traces`, `/api/public/observations`) return **404** in `events_only` mode. |
+| `GET /api/public/v2/metrics` | Aggregate query API. Replaces `/api/public/metrics`, which is gone in v4. |
 
-**Consequence for monitoring:** a 207 from ingestion proves nothing about durability. An end-to-end
+**Consequence for monitoring:** an accepted ingest proves nothing about durability. An end-to-end
 ingestion check must **write a trace and then read it back**, allowing for queue lag.
+[`scripts/ingestion-canary.sh`](../scripts/ingestion-canary.sh) already writes via OTLP and reads back
+via v2 observations — do not "fix" it back to the legacy endpoint.
 
 ### Tuning environment variables
 
@@ -189,16 +193,63 @@ ingestion is silently backlogged.
 
 ## 6. Backups
 
-| Component | Method | Frequency |
-|---|---|---|
-| **Postgres** | Logical dump + WAL/PITR | Continuous WAL, daily full |
-| **ClickHouse** | Native backup to object storage | Daily |
-| **Blob storage** | Versioning / replicated bucket | Continuous |
-| **Config & IaC** | Git | Every change |
+> **Status: tooling implemented, NOT YET RUNNING on the server.** Audit F-04 found no backups at
+> all — not misconfigured, absent. [`scripts/backup.sh`](../scripts/backup.sh) and
+> [`scripts/restore-test.sh`](../scripts/restore-test.sh) close the tooling half. Until the cron
+> entry below exists on the box and one restore has passed, **this platform still has no verified
+> data protection** and F-04 stays open.
 
-Requirements: automated · **encrypted** · stored **off the primary host** · EU-resident · retention
-aligned to the 90-day policy · **success and failure both monitored** (a silent backup job is an
-unmonitored one).
+| Component | Method | Frequency | Implemented by |
+|---|---|---|---|
+| **Postgres** | `pg_dump -Fc`, encrypted | Daily | `scripts/backup.sh` |
+| **ClickHouse** | Native `BACKUP DATABASE`, tarred + encrypted | Daily | `scripts/backup.sh` |
+| **Blob storage** | `mc mirror` of the event bucket, encrypted | Daily | `scripts/backup.sh` |
+| **Valkey** | **Deliberately not backed up** — in-flight queue only; its loss is accepted under CLAUDE.md requirement 10 | — | — |
+| **Config & IaC** | Git | Every change | — |
+
+Requirements, and how each is met:
+
+| Requirement | How |
+|---|---|
+| Automated | cron, below |
+| **Encrypted** | AES-256, PBKDF2 600k iterations, `BACKUP_ENCRYPTION_KEY` |
+| **Off the primary host** | `BACKUP_REMOTE` (rsync/SSH → Hetzner Storage Box). **`backup.sh` refuses to run without it** unless `--local-only` is passed |
+| EU-resident | Hetzner Storage Box, same jurisdiction as the box |
+| Retention | `BACKUP_RETENTION_DAYS` locally; remote retention is the storage target's job **on purpose** — pruning the remote from the machine being backed up means a compromise of that machine can erase its own backups |
+| **Success *and failure* monitored** | Both scripts write Prometheus textfile metrics; [`infra/prometheus/rules/backups.yml`](../infra/prometheus/rules/backups.yml) alerts on failure, staleness, **and total absence of the metric** |
+
+### Enabling it on the host
+
+```bash
+# 1. Generate the key (or let scripts/generate-secrets.sh do it on a fresh deploy)
+openssl rand -hex 32          # → BACKUP_ENCRYPTION_KEY in infra/.env
+
+# 2. Set BACKUP_REMOTE in infra/.env, then rehearse before trusting it
+./scripts/backup.sh --dry-run
+./scripts/backup.sh
+./scripts/restore-test.sh
+
+# 3. Only then, schedule it
+sudo crontab -e
+#   17 3 * * *  cd /opt/langfuse && ./scripts/backup.sh      >> /var/log/langfuse-backup.log 2>&1
+#   40 4 * * 0  cd /opt/langfuse && ./scripts/restore-test.sh >> /var/log/langfuse-restore.log 2>&1
+```
+
+> ### ⚠️ `BACKUP_ENCRYPTION_KEY` is not like the other secrets
+>
+> Every other credential in `infra/.env` can be rotated by regenerating and redeploying. This one
+> cannot: rotate it without keeping the old value and **every existing backup becomes permanently
+> undecryptable**.
+>
+> Worse, it lives in `infra/.env` — **on the machine it protects**. Lose the box and you lose the
+> key, and the off-host copies you were careful to make are unreadable. A backup you cannot decrypt
+> is not a backup.
+>
+> **Put it in the team password manager, and record here where it went:**
+>
+> ```
+> BACKUP_ENCRYPTION_KEY stored at: ______________________  on: __________
+> ```
 
 ---
 
@@ -206,21 +257,36 @@ unmonitored one).
 
 > A backup is not valid because the job reported success. It is valid because a restore worked.
 
-Scheduled (at minimum monthly) automated test:
+[`scripts/restore-test.sh`](../scripts/restore-test.sh) implements this. It runs under a **separate
+compose project on a separate network with throwaway volumes and no published ports**, which is why
+it is safe to run on the production host — the only place the backups are.
 
 ```text
 Backup artifact
-  → Restore into isolated environment
-  → Verify Postgres schema and row counts
-  → Verify ClickHouse tables and row counts
-  → Verify Langfuse starts and passes /api/public/health?failIfDatabaseUnavailable=true
-  → Verify sample traces are queryable
-  → Record result + duration
-  → Report; failure = CRITICAL
+  → sha256 verify against the manifest        ← catches a truncated transfer
+  → Restore Postgres into an isolated instance
+  → Assert projects and api_keys have ROWS    ← not that pg_restore exited 0
+  → Restore ClickHouse into an isolated instance
+  → Assert observations has ROWS              ← not that RESTORE exited 0
+  → Verify the MinIO archive unpacks
+  → Record result + write Prometheus metrics
+  → Tear everything down
 ```
 
-Publish **last successful restore test** on the dashboard. If that date goes stale, the disaster
-recovery plan is theoretical.
+**Why it asserts on row counts rather than exit codes:** `pg_restore` exits non-zero for entirely
+benign reasons, and exits **zero** having restored an empty schema. A ClickHouse `RESTORE` that
+recreates every table and no data likewise succeeds. Only the row count answers the question that
+matters.
+
+Run it **at least monthly**, and prefer `--from-remote` at least quarterly — the off-host copy is
+the one a real incident would reach for, and it is the copy whose transfer can silently truncate.
+
+`RestoreTestStale` fires after 90 days without a pass, which is the retention window: beyond it, no
+artifact still in existence has ever been proven restorable. Record each result:
+
+```
+Last successful restore test: ______________  by: __________  from: local / remote
+```
 
 ---
 

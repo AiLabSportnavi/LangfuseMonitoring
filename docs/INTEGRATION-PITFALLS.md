@@ -35,10 +35,16 @@ documentation** and most produced no error at all.
 | 13 | A tool that throws records no output | Failure step is a black box | ✅ silent |
 | 14 | Pushing `modelInput` through runtime context | Quadratic payload growth | ✅ silent |
 | 15 | Several spans each claim `is_app_root` | Trace-level fields are non-deterministic | ✅ silent |
-| 16 | Read APIs sit behind the admin IP allowlist | `403 Not authorized` that reads as a bad key | ❌ loud |
+| 16 | Read APIs sit behind the admin IP allowlist | Fix committed, applies on next Caddy reload. A `401` does NOT prove the allowlist is off | ✅ silent |
 | 17 | The turn root closes before the turn finishes | Trace output is a `tool_call`, not the answer | ✅ silent |
 | 18 | `Span.updateName()` is a no-op inside `onEnd` | Renames silently do nothing | ✅ silent |
 | 19 | Framework span names embed the model id | Names churn on every model change | ✅ silent |
+| 20 | Azure `/openai/v1` endpoint is wrong for a Langfuse LLM connection | `PUT` returns 201, every judge then 404s | ✅ silent |
+| 21 | `metadata.langfusePrompt` does nothing on SDK v5 | Metadata looks right, prompt is not linked | ✅ silent |
+| 22 | An uncached prompt fallback breaks its own detection | No `prompt-fallback` tag, +2s on every turn | ✅ silent |
+| 23 | `scripts/` was outside tsconfig `include` | Typecheck passes having checked nothing | ✅ silent |
+| 24a | Module state duplicated across eve's bundles | Prompt resolves, attribute never written | ✅ silent |
+| 24b | Prompt link is generation-only; attributes don't inherit | Attribute on `agent-step`, no link anywhere | ✅ silent |
 
 ---
 
@@ -449,44 +455,52 @@ See `correctAppRoot` in [`agent/enrich-spans.ts`](../examples/eve-langfuse-poc/a
 
 ---
 
-## 16. The read APIs are behind the admin IP allowlist; ingest is not
+## 16. The read APIs are behind the admin IP allowlist; ingest is not — **being retired**
 
-**Symptom.** Every verification and provisioning call fails identically:
+> ### ⚠️ Status: the fix is committed, and applies on the next Caddy reload.
+>
+> `ADMIN_ALLOWLIST` is removed from the Langfuse site block as part of the move to Entra ID SSO
+> (single-tenant). Until the server reloads Caddy, **this pitfall still applies in production** and a
+> non-allowlisted client still gets `403`. Check the running container rather than the repo:
+> `docker exec langfuse-caddy-1 sh -c 'echo $ADMIN_ALLOWLIST'`.
+>
+> Once applied, the obsolete advice is **"add the CI runner's egress IP to the admin matcher"** —
+> there will be no matcher to add it to. GitHub-hosted runners and Vercel functions reach the full
+> public API with keys alone, which is what unblocks the evaluation layer.
 
-```
-GET /api/public/v2/observations -> 403 Not authorized
-POST /api/public/models         -> 403 Not authorized
-```
+> ### ⚠️ How this was misdiagnosed, which is the reusable part
+>
+> A probe from one client returned `401` (not `403`) on every `/api/public/*` route, and that was
+> read as "the allowlist is gone". It was not: **an allowlisted client also sees `401`.** The
+> allowlist answers `403` only to addresses outside it, so a single client can never distinguish
+> "removed" from "I am inside it". The address in question was allowlisted.
+>
+> To actually tell them apart: probe an **allowlist-gated surface** that has no API-key layer — the
+> Grafana host. A proxied response (302 to its login) means you are inside the allowlist; `403`
+> means outside. Or read the container's env directly.
+>
+> **The obsolete advice was "add the CI runner's egress IP to the admin matcher."** There is no matcher
+> to add it to, and chasing one wastes the time this entry was written to save. GitHub-hosted runners
+> and Vercel functions both reach the full public API with keys alone.
 
-The natural reading — expired or wrong API keys — is wrong. The same credentials on the
-same host ingest traces successfully.
+**Kept because the diagnostic is still worth having.** The 401-vs-403 distinction is how you tell a
+credential problem from a network-policy problem on *any* Langfuse deployment:
 
-**Root cause.** This is the architecture working as designed (CLAUDE.md §5.3, §12.1). Only
-the ingest endpoints are public, because Vercel has no static egress IPs. Everything else —
-including every **read** API, `/api/public/models`, `/api/public/v2/prompts` and
-`/api/public/mcp` — falls through to the admin allowlist in
-[`infra/caddy/Caddyfile`](../infra/caddy/Caddyfile).
+| Response | Means |
+|---|---|
+| **401** on a `/api/public/*` route | Bad, missing or revoked API keys — **this is the only case that still occurs here** |
+| **403** with a plain-text body | A reverse-proxy network policy rejected you before Langfuse saw the request. Not a key problem. |
+| **404** on `/api/public/traces`, `/api/public/observations` | `events_only` mode retired the v3 read APIs — see pitfall #3, not a permissions issue |
 
-**How to tell the two apart in one command each:**
+**Still true, and still a five-minute detour if you forget it:** `POST /api/public/otel` returns
+**404**. The real path is `/api/public/otel/v1/traces` — the exporter appends `/v1/traces` itself.
+Probing the bare path and reading the 404 as "ingest is broken" remains the trap it always was.
 
-| Probe | Allowlisted | Not allowlisted |
-|---|---|---|
-| `GET /api/public/health` | 200 | 200 |
-| `POST /api/public/otel/v1/traces` | 200 | **200** |
-| `GET /api/public/projects` | 200 | **403** |
-
-A bad key gives **401** everywhere, including ingest. A 403 on reads with a 200 on ingest is
-always the allowlist.
-
-**Note the OTLP path.** `POST /api/public/otel` returns **404** — the exporter appends
-`/v1/traces`. Probing the bare path and reading the 404 as "ingest is broken" is a
-five-minute detour worth avoiding.
-
-**Consequence for this integration.** Tracing changes can be verified *pre-export* with
-`EVE_SPAN_DEBUG=1`, which prints every span's final attributes. They cannot be verified by
-**read-back** except from an allowlisted host or VPN — and per CLAUDE.md §7.6 read-back is
-the only proof that counts. Run `npm run verify` from the allowlisted network, or add the
-CI runner's egress IP to the admin matcher.
+**Consequence for this integration — now inverted.** Read-back verification, which CLAUDE.md §7.6
+calls the only proof that counts, no longer needs an allowlisted host. `npm run verify` works from any
+network, and CI can verify traces, run experiments and ingest scores directly. `EVE_SPAN_DEBUG=1`
+pre-export inspection drops from "the only available check" to "a faster first check" — it was always
+the weaker standard of proof, and there is no longer any reason to settle for it.
 
 ---
 
@@ -591,6 +605,239 @@ distinct nodes. Per-execution values (tool call id, step index, session id) go t
 `verify-traces.ts` asserts every observation name against an exact allowlist, so a framework
 upgrade that reintroduces `chat gpt-4o-mini` fails the build instead of quietly breaking
 dashboards.
+
+---
+
+## 20. The Azure endpoint that works for the agent is wrong for a Langfuse LLM connection
+
+**Symptom.** `PUT /api/public/llm-connections` succeeds with **201**, the connection appears in
+project settings, and then every LLM-as-a-judge evaluation fails — or an evaluator cannot be saved
+because the test call fails. The 201 proves only that the record was stored; **nothing validates the
+URL at write time.**
+
+**Root cause.** Two different Azure surfaces, one environment variable.
+
+`AZURE_AI_CHATBOT_OPENAI_ENDPOINT` is `https://<resource>.openai.azure.com/openai/v1` — Azure's
+OpenAI-compatible **v1 surface**, which is exactly what `agent/model.ts` wants (see pitfall #4).
+
+Langfuse does not use that surface. Verified in
+`packages/shared/src/server/llm/ai-sdk/providers/azure.ts`, it calls `createAzure` with:
+
+```ts
+apiVersion: "2025-02-01-preview",   // pinned
+useDeploymentBasedUrls: true,       // appends /deployments/{deployment}{path}
+```
+
+So Langfuse builds `{baseURL}/deployments/{model}/chat/completions?api-version=...`. Passing the
+`/openai/v1` endpoint therefore yields:
+
+```
+https://<resource>.openai.azure.com/openai/v1/deployments/gpt-4o-mini/chat/completions   → 404
+                                          ^^^ the v1 that must not be there
+```
+
+`translateAzureBaseURL` normalises any URL **containing `/deployments`** back to its parent, but
+`/openai/v1` contains no `/deployments`, so it is passed through unchanged. The normaliser cannot
+save you here.
+
+**Fix.** Strip the `/v1` when configuring the Langfuse connection — the same normalisation
+`model.ts` already performs for the opposite reason:
+
+```ts
+const base = raw.replace(/\/+$/, "").replace(/\/v1$/, "");
+// → https://<resource>.openai.azure.com/openai
+```
+
+**Also required: `customModels`.** Langfuse ships **no default model list for Azure**
+(`MODEL_MAP[LLMAdapter.Azure] = []` in `packages/shared/src/server/llm/types.ts`), so a connection
+created with `withDefaultModels: true` and no `customModels` has **zero selectable models** and no
+evaluator can be configured against it. For Azure the model id **is the deployment name**
+(`provider.chat(modelId)`).
+
+⚠️ **`langfuse-cli api llm-connections put` does not expose `customModels`** even though the REST
+API accepts it — so the CLI cannot create a working Azure connection. Use raw `PUT`.
+
+**How to verify without the UI.** Reproduce the exact request Langfuse will make, including the
+forced tool call that every managed judge depends on:
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' -X POST \
+  "$BASE/deployments/$DEPLOYMENT/chat/completions?api-version=2025-02-01-preview" \
+  -H "api-key: $AZURE_KEY" -H 'Content-Type: application/json' \
+  -d '{"temperature":0,"messages":[{"role":"user","content":"hi"}],
+       "tools":[{"type":"function","function":{"name":"extract","parameters":{"type":"object","properties":{"score":{"type":"number"}},"required":["score"]}}}],
+       "tool_choice":{"type":"function","function":{"name":"extract"}}}'   # expect 200
+```
+
+A 200 here with a populated `tool_calls[0]` is the proof. A judge model that cannot do forced tool
+calling will fail at evaluation time regardless of a healthy connection record.
+
+---
+
+## 21. `metadata.langfusePrompt` does not link a prompt on SDK v5
+
+**Symptom.** You follow the official
+[link-to-traces](https://langfuse.com/docs/prompt-management/features/link-to-traces) guidance for the
+Vercel AI SDK, pass `experimental_telemetry: { metadata: { langfusePrompt: prompt.toJSON() } }`, and
+the trace shows a `langfusePrompt` blob in observation metadata. It looks right. The prompt is **not
+linked**: no clickable prompt on the observation, and no per-version metrics.
+
+**Root cause.** `langfusePrompt` was the **v3 `LangfuseExporter`** convention. It does not exist in
+`@langfuse/*@5.x` — verified by grepping the installed tree, where the string appears in **no file**.
+Nothing consumes the key, so it falls through to generic metadata like any other unrecognised value.
+
+**Fix.** Set the two span attributes the v5 SDK actually reads:
+
+```
+langfuse.observation.prompt.name
+langfuse.observation.prompt.version
+```
+
+In this repo they ride eve's runtime context from `instrumentation.ts`, because
+`promoteRuntimeContext` in `enrich-spans.ts` already strips the AI SDK's
+`ai.settings.context.` prefix from any `langfuse.*` key — so no new machinery was needed. The
+alternative is `propagateAttributes({ prompt }, fn)` from `@langfuse/core`.
+
+**A fallback prompt is never linked.** Three `isFallback` guards in
+`@langfuse/core` and `@langfuse/tracing` drop the attributes when the SDK served a fallback, and it is
+logged at **debug** level only. This is the asymmetry that matters: the situation where you most need
+the trace to tell you something is exactly the one where Langfuse tells you nothing. Carry your own
+signal — this repo stamps a `prompt-fallback` trace tag and asserts on `promptIsFallback` in metadata.
+
+**Verification standard.** Metadata presence is **not** evidence. The prompt name must render as a
+*clickable link* on the observation in the Langfuse UI. Nothing short of that click proves the link.
+
+---
+
+## 22. A prompt fallback that is not cached breaks its own detection, twice
+
+**Symptom.** None, on the happy path. During a Langfuse outage: the agent keeps answering (correct),
+but the `prompt-fallback` trace tag never appears, and every turn becomes ~2s slower.
+
+**Root cause.** One omission, two consequences. The resolver returned the bundled fallback **without
+writing it to the cache**:
+
+1. `peekResolvedPrompt()` reads that cache, and `instrumentation.ts` calls it synchronously inside
+   `step.started`. With nothing cached it received `undefined`, took the "no prompt" branch, and
+   never stamped the tag — **silently disabling the only signal that a turn ran on the bundled
+   prompt.** The detection mechanism was defeated by the very condition it existed to detect.
+2. With nothing cached, the value was always expired, so **every turn re-attempted the fetch** and
+   paid the full `AbortSignal.timeout` — converting an observability outage into a latency
+   regression on every request, which is exactly what CLAUDE.md §4 requirement 10 forbids.
+
+**Fix.** Cache the fallback too, with a shorter retry TTL (`LANGFUSE_PROMPT_RETRY_MS`, default 10s)
+so recovery stays quick without retrying per turn. Serve a cached *good* value in preference to the
+fallback, so a brief outage does not revert a deployed prompt change.
+
+**How it was found.** `scripts/verify-prompt-resolver.ts` runs the resolver against five
+environments — reachable, connection-refused, black-holed, 401, and 404 — each in its own subprocess,
+and asserts `peekIsSet` plus a **warm-resolve latency budget**. A test that only asked "does the
+prompt resolve?" passes with both bugs present. Run it with `npm run verify:prompt-resolver`.
+
+---
+
+## 23. `tsc --noEmit` reported success while checking none of `scripts/`
+
+**Symptom.** `npm run typecheck` exits 0. The scripts it supposedly checked contain type errors,
+including duplicate top-level declarations.
+
+**Root cause.** `tsconfig.json` had `"include": ["agent/**/*.ts", "evals/**/*.ts"]`. `scripts/` was
+absent, so every verification and provisioning script — the tooling whose whole job is to catch
+problems — was itself unchecked. A green typecheck meant nothing about it.
+
+**Fix.** Add `scripts/**/*.ts` to `include`. Two settings are then required for it to pass, and both
+are worth understanding rather than pasting:
+
+- **`"moduleDetection": "force"`** — `verify-traces.ts` and `provision-model-prices.ts` have no
+  `import`/`export`, so TypeScript classifies them as **global scripts sharing one scope** and reports
+  that they redeclare each other's top-level `BASE_URL` and `auth`. The errors are artefacts of that
+  classification, not of the code.
+- **`"allowImportingTsExtensions": true`** — `agent/lib/prompt.ts` is imported both by eve's bundler
+  and by bare `node --experimental-strip-types`, which does **not** remap `./x.js` onto `x.ts`. That
+  import therefore carries an explicit `.ts`, unlike the `.js` convention used elsewhere in `agent/`.
+
+**Generalisation worth keeping.** An `include` list is a silent allowlist: files outside it are not
+"passing", they are unexamined. Whenever a new top-level directory of TypeScript appears, the
+question is not "does typecheck still pass" but "is this directory in `include` at all".
+
+---
+
+## 24. The prompt attribute was set correctly and still linked nothing, twice
+
+Both halves produced the same symptom — a trace containing
+`langfuse.observation.prompt.name` while the observation's `promptName` stayed
+empty — and both were found only by reading the trace back and checking for a
+resolved `promptId`.
+
+### 24a. Module state does not survive eve's bundling
+
+**Symptom.** The resolver logs `resolved weather-assistant v1`, the agent answers
+correctly, and no prompt attribute reaches any span.
+
+**Root cause.** The prompt cache was a module-level `let` in `agent/lib/prompt.ts`.
+eve compiles `agent/instrumentation.ts` into a **different bundle** from the agent
+runtime that loads `agent/instructions/`, so each bundle received its own copy of
+the module and its own cache. The instructions resolver populated one;
+`instrumentation.ts` read a second one that was permanently empty, so
+`peekResolvedPrompt()` returned `undefined` and the attribute was never written.
+
+**Fix.** Keep the state on `globalThis` behind a `Symbol.for()` key. `globalThis`
+is per-realm rather than per-bundle, so both copies share one store.
+
+> Same family as pitfall #2 (the OTel provider singleton): **"one instance per
+> import" is an assumption a bundler is free to break.** Any cross-cutting cache
+> read by both instrumentation and agent code needs realm-scoped storage, not
+> module scope.
+
+### 24b. The link is honoured on GENERATIONS only, and attributes do not inherit
+
+**Symptom.** After 24a was fixed, the attribute appeared in the trace — on the
+`agent-step` observation — and `promptName` was still empty on every generation.
+
+**Root cause.** Two facts that are individually harmless:
+
+1. Langfuse honours `langfuse.observation.prompt.name` / `.version` on
+   **generations only** ([OTLP attribute mapping](https://langfuse.com/integrations/native/opentelemetry) —
+   the `prompt` row is marked *Generation only*).
+2. eve's runtime context lands on the **agent-level** span (`invoke_agent` →
+   `agent-step`), and OTel span attributes are **not inherited by child spans**.
+
+The generation (`chat` → `call-model`) is a child, so it never saw the attribute.
+The attribute was in the trace, on the wrong span, linking nothing.
+
+**Fix.** Write it per-span in the enricher's `onEnd`, gated on the observation
+type, after `renameAndType` has decided that type:
+
+```ts
+private attachPromptLink(attrs: Record<string, unknown>): void {
+  if (attrs["langfuse.observation.type"] !== "generation") return;
+  const prompt = peekResolvedPrompt();
+  if (!prompt || prompt.isFallback) return;      // fallbacks are never linked
+  attrs["langfuse.observation.prompt.name"] = prompt.name;
+  attrs["langfuse.observation.prompt.version"] = prompt.version;   // MUST be an integer
+}
+```
+
+**Version must be an integer.** The mapping table specifies `integer`; a
+stringified version is silently ignored.
+
+### The assertion that catches all of it
+
+`scripts/verify-prompt-link.ts` (`npm run verify:prompt-link`) asserts that every
+generation has a server-resolved **`promptId`**, and explicitly fails the case
+"prompt metadata present but no link" — which is precisely what all three prompt
+bugs looked like from the UI.
+
+Two traps in the verifier itself, both worth keeping:
+
+- **`prompt` is not a default field group.** `/api/public/v2/observations` returns
+  `core` + `basic` unless told otherwise, and reading `promptName` without
+  `fields=...,prompt` yields `""` for everything — indistinguishable from an
+  unlinked prompt. Same shape as pitfall #12.
+- **Scope to the newest trace, not the time window.** A window contains history,
+  and history contains traces from before the fix. Asserting across it fails for
+  reasons unrelated to the code under test, which teaches people to ignore the
+  check. `VERIFY_ALL_TRACES=1` switches to the whole-window audit deliberately.
 
 ---
 

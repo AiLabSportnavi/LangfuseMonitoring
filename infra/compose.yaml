@@ -16,6 +16,27 @@ name: langfuse
 # Upgrades go through the flow in CLAUDE.md §14, never by editing a tag in place
 # on the server.
 
+# Applied to every long-running service in this file.
+#
+# no-new-privileges blocks the setuid/setgid escalation path inside a container:
+# a process that gets code execution as a non-root user cannot regain privilege
+# through a setuid binary. It costs nothing here — no service in this stack
+# elevates after start — and it is the cheapest of the container-hardening
+# controls the audit found absent across the board.
+#
+# What this deliberately does NOT include:
+#   read_only: true      — Postgres, ClickHouse and MinIO all write outside their
+#                          named volumes (sockets, temp files, ClickHouse's
+#                          user_files and tmp paths). Enabling it needs a tmpfs
+#                          per service, verified individually, and a wrong guess
+#                          fails at startup. Tracked, not guessed at.
+#   user: / cap_drop     — the official images already drop to their own
+#                          unprivileged user after entrypoint setup, and forcing
+#                          a uid breaks volume ownership on an existing deploy.
+x-hardening: &hardening
+  security_opt:
+    - no-new-privileges:true
+
 x-langfuse-env: &langfuse-env
   DATABASE_URL: ${DATABASE_URL}
   SALT: ${SALT}
@@ -55,7 +76,21 @@ x-langfuse-env: &langfuse-env
 
 services:
   web:
+    <<: *hardening
     image: langfuse/langfuse:4.6.0
+    # A runaway container can starve the box — including starving ClickHouse,
+    # whose saturation is the exact failure this whole monitoring design exists
+    # to catch. These are CEILINGS sized for an AX102-class box (16 cores /
+    # 128 GB), not targets, and they are deliberately generous: the point is to
+    # bound a pathological process, not to tune throughput on a workload whose
+    # real volume is still unmeasured (CLAUDE.md §8.1).
+    #
+    # Re-derive these from the Grafana container dashboard once a baseline
+    # exists. A limit set too low presents as an OOM-killed container with no
+    # application error, which is a nasty thing to debug.
+    deploy:
+      resources:
+        limits: { cpus: "4", memory: 6G }
     depends_on:
       postgres: { condition: service_healthy }
       clickhouse: { condition: service_healthy }
@@ -98,6 +133,31 @@ services:
       # has been confirmed to hold OWNER on the org — otherwise this produces a
       # running platform with no administrator, recoverable only via Postgres.
       AUTH_DISABLE_USERNAME_PASSWORD: ${AUTH_DISABLE_USERNAME_PASSWORD:-false}
+
+      # ─── Registration boundary (audit F-02) ───────────────────────────────
+      # The UI is on the public internet, so /auth/sign-up renders to arbitrary
+      # clients. Two independent controls bound what reaching that page is
+      # worth, and BOTH are needed because each fails differently:
+      #
+      #   AUTH_DISABLE_USERNAME_PASSWORD=true makes Entra the only credential,
+      #   so the single-tenant app registration becomes the registration
+      #   boundary. That is the primary control — but it is only in force once
+      #   SSO cut-over completes, and it is a variable someone can flip back.
+      #
+      #   LANGFUSE_ALLOWED_ORGANIZATION_CREATORS below is the backstop: even a
+      #   principal that does obtain an account cannot mint an organisation,
+      #   and therefore cannot allocate ClickHouse or NVMe capacity on the box
+      #   whose primary documented risk is disk exhaustion (CLAUDE.md §10.1).
+      #
+      # Deliberately NOT using AUTH_DISABLE_SIGNUP: per Langfuse's docs it also
+      # blocks invited colleagues who have no account yet, which breaks
+      # onboarding. The identity boundary is the correct control, not the
+      # blanket switch.
+      #
+      # ⚠️ An EMPTY value here is not "deny" — Langfuse treats unset as "any
+      # authenticated user may create an org". scripts/test-compose-config.sh
+      # asserts it is non-empty for that reason.
+      LANGFUSE_ALLOWED_ORGANIZATION_CREATORS: ${LANGFUSE_ALLOWED_ORGANIZATION_CREATORS:-}
       # Headless bootstrap. These RE-CREATE the org and the seed user on every
       # web start if they are absent — deleting either in the UI is undone by
       # the next restart. Once a real (SSO) owner exists, blank them, or the
@@ -134,7 +194,14 @@ services:
     networks: [langfuse]
 
   worker:
+    <<: *hardening
     image: langfuse/langfuse-worker:4.6.0
+    # Sized level with web. The worker is the ingestion bottleneck (CLAUDE.md
+    # §11.2), so if this ceiling is ever the binding constraint the answer is
+    # more worker replicas, not a bigger single worker.
+    deploy:
+      resources:
+        limits: { cpus: "4", memory: 6G }
     depends_on:
       postgres: { condition: service_healthy }
       clickhouse: { condition: service_healthy }
@@ -155,7 +222,11 @@ services:
     networks: [langfuse]
 
   postgres:
+    <<: *hardening
     image: postgres:17-alpine
+    deploy:
+      resources:
+        limits: { cpus: "4", memory: 16G }
     environment:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
@@ -173,7 +244,20 @@ services:
     networks: [langfuse]
 
   clickhouse:
+    <<: *hardening
     image: clickhouse/clickhouse-server:25.12-alpine
+    # The largest allocation on the box, deliberately. ClickHouse is the
+    # component the tier-upgrade triggers in CLAUDE.md §8.7 are written about,
+    # and the one that must never be squeezed by a neighbour.
+    #
+    # A `reservation` as well as a limit: reservations are what stop another
+    # container's spike from starving ClickHouse, which is the failure mode the
+    # limits above exist to prevent. A limit alone protects everyone else FROM
+    # ClickHouse; the reservation protects ClickHouse from everyone else.
+    deploy:
+      resources:
+        limits: { cpus: "10", memory: 64G }
+        reservations: { memory: 8G }
     environment:
       CLICKHOUSE_DB: default
       CLICKHOUSE_USER: ${CLICKHOUSE_USER}
@@ -194,6 +278,11 @@ services:
       # Native Prometheus endpoint on :9363, not published to the host. Harmless
       # when the monitoring stack is not running — nothing scrapes it.
       - ./clickhouse/config.d/prometheus.xml:/etc/clickhouse-server/config.d/prometheus.xml:ro
+      # Declares the one path BACKUP statements may write to. Without it
+      # scripts/backup.sh cannot take a ClickHouse backup at all — ClickHouse
+      # rejects any undeclared destination. See the file for why File() rather
+      # than Disk() at Tier 1.
+      - ./clickhouse/config.d/backup.xml:/etc/clickhouse-server/config.d/backup.xml:ro
       - clickhouse_data:/var/lib/clickhouse
       - clickhouse_logs:/var/log/clickhouse-server
     ulimits:
@@ -208,12 +297,34 @@ services:
     networks: [langfuse]
 
   redis:
+    <<: *hardening
     image: valkey/valkey:8-alpine
     # noeviction is deliberate: Valkey holds the ingestion queue, and evicting
     # keys would silently discard queued events. Alert on memory pressure
     # instead of evicting. See CLAUDE.md §8.5 for the 1GB/100k-events-per-minute
     # sizing rule.
-    command: ["valkey-server", "--requirepass", "${REDIS_AUTH}", "--maxmemory-policy", "noeviction"]
+    #
+    # ⚠️ --maxmemory and the container limit below MUST be set together, and
+    # maxmemory must be the SMALLER of the two. A container memory limit on its
+    # own is actively dangerous here: Valkey would grow until the kernel
+    # OOM-killed it, discarding the ENTIRE queue at once with no application
+    # error. With maxmemory set lower, Valkey instead refuses writes and
+    # Langfuse's producers see explicit errors — loud, bounded, and visible in
+    # the eviction/memory panels. Loud beats silent when the payload is a queue.
+    #
+    # 6 GB against the §8.5 rule covers ~600k events/minute, far above the
+    # aspirational ceiling. Raise both numbers together or not at all.
+    command:
+      - valkey-server
+      - --requirepass
+      - ${REDIS_AUTH}
+      - --maxmemory-policy
+      - noeviction
+      - --maxmemory
+      - ${REDIS_MAXMEMORY:-6gb}
+    deploy:
+      resources:
+        limits: { cpus: "2", memory: 8G }
     environment:
       TZ: UTC
       # Referenced by the healthcheck so the password never appears in `ps` output.
@@ -229,8 +340,12 @@ services:
     networks: [langfuse]
 
   minio:
+    <<: *hardening
     image: minio/minio:RELEASE.2025-09-07T16-13-09Z
     command: server /data --address ":9000" --console-address ":9001"
+    deploy:
+      resources:
+        limits: { cpus: "2", memory: 4G }
     environment:
       MINIO_ROOT_USER: ${MINIO_ROOT_USER}
       MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD}
@@ -280,12 +395,23 @@ services:
       context: ./caddy
       dockerfile: Dockerfile
     image: langfuse-caddy:2.11.4-ratelimit-0.1.0
+    <<: *hardening
+    # Caddy is the only internet-facing process on the box, so it is also the
+    # one whose resource exhaustion an attacker can most directly provoke. The
+    # limit stops an ingest flood from taking the host down with the proxy.
+    deploy:
+      resources:
+        limits: { cpus: "4", memory: 2G }
     depends_on:
       web: { condition: service_healthy }
     environment:
       LANGFUSE_DOMAIN: ${LANGFUSE_DOMAIN}
       ACME_EMAIL: ${ACME_EMAIL}
-      ADMIN_ALLOWLIST: ${ADMIN_ALLOWLIST}
+      # ADMIN_ALLOWLIST is deliberately ABSENT. IP-based trust was removed from
+      # this deployment entirely — Grafana was its last consumer and now carries
+      # Entra ID SSO. Re-adding it here would be the first half of reintroducing
+      # a control that was verified NOT to work (audit F-01) and that granted
+      # standing admin reach to a rotating residential address (F-05).
       # Consumed by the Grafana site block in the Caddyfile. Defaulted here AND
       # in the Caddyfile so the stack still starts when the monitoring compose
       # file is not merged in — see DEPLOYMENT-PITFALLS.md #14, where a variable

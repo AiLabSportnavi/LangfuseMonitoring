@@ -1,0 +1,93 @@
+# Backup and restore alerting. Audit findings F-04 and F-12.
+#
+# These rules are the exception to the "alerting is deferred until a baseline
+# exists" position taken elsewhere in this stack, and deliberately so.
+#
+# That position is correct for THRESHOLD alerts: nobody has observed this
+# platform's real queue depth or disk growth, so a number chosen today would be
+# a guess, and a guessed threshold trains a channel to ignore alerts.
+#
+# It does not apply here. "The backup did not run" and "the backup failed" are
+# not thresholds — they are facts, and they are true or false independent of any
+# baseline. They also describe the one failure the platform cannot recover from:
+# Postgres holds every project API key and the platform's identity, and losing
+# it is unrecoverable in a way that losing trace history is not (CLAUDE.md §13).
+#
+# ── The absence case is the important one ─────────────────────────────────────
+# BackupMetricsMissing exists because a cron job that was removed, renamed, or
+# silently stopped produces NO metric at all — and a rule written only against
+# `langfuse_backup_success == 0` never fires for it. A deleted backup job would
+# then look identical to a working one, which is precisely the state the audit
+# found the platform in.
+groups:
+  - name: backups
+    rules:
+      - alert: BackupMetricsMissing
+        # `absent()` fires when the series does not exist at all: no backup has
+        # ever run, node-exporter's textfile collector is not reading the
+        # directory, or the job was removed. Ten minutes is long enough to ride
+        # out a Prometheus restart and short enough to notice the same day.
+        expr: absent(langfuse_backup_last_run_timestamp_seconds)
+        for: 10m
+        labels:
+          severity: critical
+          component: backup
+        annotations:
+          summary: "No backup metrics at all — backups may not be running"
+          description: >-
+            langfuse_backup_last_run_timestamp_seconds does not exist. Either
+            scripts/backup.sh has never run on this host, or the cron entry was
+            removed, or node-exporter is not reading BACKUP_METRICS_DIR. Until
+            this is resolved the platform has NO verified data protection.
+          runbook: "docs/OPERATIONS.md §6"
+
+      - alert: BackupFailed
+        expr: langfuse_backup_success == 0
+        for: 5m
+        labels:
+          severity: critical
+          component: backup
+        annotations:
+          summary: "The most recent backup run failed"
+          description: >-
+            scripts/backup.sh exited non-zero. Check the cron log. Common causes:
+            BACKUP_REMOTE unreachable, the ClickHouse BACKUP statement rejected
+            because backup.xml is not mounted, or the staging disk is full.
+          runbook: "docs/OPERATIONS.md §6"
+
+      - alert: BackupStale
+        # 26h, not 24h: a daily job plus jitter plus a slow ClickHouse archive
+        # should not page. This fires when a day has genuinely been missed.
+        expr: time() - langfuse_backup_last_success_timestamp_seconds > 26 * 3600
+        for: 30m
+        labels:
+          severity: critical
+          component: backup
+        annotations:
+          summary: "No successful backup in over 26 hours"
+          description: >-
+            The last fully successful backup (including the off-host copy) is
+            more than a day old. Every hour this stays true is an hour of
+            project credentials and trace history that a lost box takes with it.
+          runbook: "docs/OPERATIONS.md §6"
+
+      - alert: RestoreTestStale
+        # THE control that decides whether any of the above means anything.
+        # A backup is valid because a restore worked, not because a job reported
+        # success (CLAUDE.md §13). 90 days matches the retention window: beyond
+        # it, no artifact still in existence has ever been proven restorable.
+        expr: >-
+          absent(langfuse_restore_test_last_success_timestamp_seconds)
+          or time() - langfuse_restore_test_last_success_timestamp_seconds > 90 * 24 * 3600
+        for: 1h
+        labels:
+          severity: warning
+          component: backup
+        annotations:
+          summary: "No successful restore rehearsal in 90 days"
+          description: >-
+            scripts/restore-test.sh has not passed within the retention window,
+            so disaster recovery is currently a theory. Run it against the newest
+            backup — ideally with --from-remote, since the off-host copy is the
+            one a real incident would use.
+          runbook: "docs/OPERATIONS.md §7"

@@ -1,0 +1,32 @@
+<?xml version="1.0"?>
+<!--
+  Enables ClickHouse's native BACKUP/RESTORE statements (audit F-04).
+
+  Without this file, `BACKUP DATABASE default TO File(...)` fails with
+  "Path ... is not allowed for backups" — ClickHouse refuses to write a backup
+  anywhere that has not been explicitly declared. That refusal is deliberate on
+  ClickHouse's part: BACKUP takes a server-side filesystem path, so an
+  unrestricted setting would let any user with query access write arbitrary
+  files as the ClickHouse user.
+
+  WHY File() AND NOT Disk(): a Disk-based backup destination is the better shape
+  at Tier 2+, where the target is S3 and ClickHouse writes there directly. At
+  Tier 1 the target is the local NVMe and then an off-host copy made by
+  scripts/backup.sh, so a plain path is simpler and one moving part fewer. The
+  disk-based form is the thing to revisit when ClickHouse gets S3 external
+  disks (CLAUDE.md §8.3), not before.
+
+  ⚠️ The path below lives INSIDE /var/lib/clickhouse, which is the
+  clickhouse_data volume. That is intentional — it is the only writable
+  persistent path the container already owns — but it means a backup consumes
+  the same NVMe budget as the data it protects. scripts/backup.sh therefore
+  removes the local ClickHouse backup as soon as it has been archived and
+  copied off-host. If that cleanup is ever skipped, the disk-exhaustion risk in
+  CLAUDE.md §10.1 gets worse, not better, so the alert on projected
+  days-until-full covers this too.
+-->
+<clickhouse>
+    <backups>
+        <allowed_path>/var/lib/clickhouse/backups/</allowed_path>
+    </backups>
+</clickhouse>

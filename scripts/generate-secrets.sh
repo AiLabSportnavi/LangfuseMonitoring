@@ -13,10 +13,22 @@ gen() { openssl rand -hex 32; }
 
 pg_pw=$(gen); ch_pw=$(gen); redis_pw=$(gen); minio_pw=$(gen)
 nextauth=$(gen); salt=$(gen); enc=$(gen); init_pw=$(gen)
-# Grafana's local admin. One of the two controls guarding the dashboards (the
-# other is ADMIN_ALLOWLIST), so it gets the same treatment as every other
-# credential here rather than a memorable password chosen at setup time.
+# Grafana's local admin. Since ADMIN_ALLOWLIST was retired this is the
+# BREAK-GLASS credential behind Entra SSO, not a second network control, so it
+# gets the same treatment as every other credential here rather than a
+# memorable password chosen at setup time.
 grafana_pw=$(gen)
+
+# Encrypts every backup artifact (scripts/backup.sh).
+#
+# ⚠️ THIS ONE IS DIFFERENT FROM EVERY OTHER SECRET HERE. The others can be
+# rotated by regenerating and redeploying. This one cannot: rotate it without
+# keeping the old value and every existing backup becomes permanently
+# undecryptable. It also lives on the machine it protects, so if the box is
+# lost, so is the key — and the off-host backups are then unreadable.
+#
+# Copy it into the team password manager as soon as this script finishes.
+backup_key=$(gen)
 
 sed \
   -e "s|^POSTGRES_PASSWORD=.*|POSTGRES_PASSWORD=${pg_pw}|" \
@@ -32,6 +44,7 @@ sed \
   -e "s|^ENCRYPTION_KEY=.*|ENCRYPTION_KEY=${enc}|" \
   -e "s|^LANGFUSE_INIT_USER_PASSWORD=.*|LANGFUSE_INIT_USER_PASSWORD=${init_pw}|" \
   -e "s|^GRAFANA_ADMIN_PASSWORD=.*|GRAFANA_ADMIN_PASSWORD=${grafana_pw}|" \
+  -e "s|^BACKUP_ENCRYPTION_KEY=.*|BACKUP_ENCRYPTION_KEY=${backup_key}|" \
   infra/.env.example > "$target"
 
 chmod 600 "$target"
@@ -47,7 +60,17 @@ if grep -qE '^[A-Za-z_][A-Za-z0-9_]*=.*CHANGEME' "$target"; then
 fi
 
 echo "Generated $target (mode 600)."
-echo "Now set NEXTAUTH_URL, LANGFUSE_DOMAIN, ACME_EMAIL and ADMIN_ALLOWLIST to real values."
+echo "Now set NEXTAUTH_URL, LANGFUSE_DOMAIN and ACME_EMAIL to real values."
+echo
+echo "There is NO ADMIN_ALLOWLIST any more — access control is Entra ID SSO. Set"
+echo "LANGFUSE_ALLOWED_ORGANIZATION_CREATORS to the real admin addresses before the"
+echo "instance is reachable: an EMPTY value means any authenticated user may create"
+echo "an organisation, which is not the same as nobody."
+echo
+echo "⚠️  COPY BACKUP_ENCRYPTION_KEY INTO THE TEAM PASSWORD MANAGER NOW."
+echo "    It lives on the box it protects. Lose the box and every off-host backup"
+echo "    becomes permanently undecryptable. Then set BACKUP_REMOTE and run:"
+echo "        ./scripts/backup.sh && ./scripts/restore-test.sh"
 echo
 echo "If you will run the monitoring stack, also set GRAFANA_DOMAIN (it needs its"
 echo "own DNS A record) and, once the worker has run, REDIS_QUEUE_KEY_PATTERNS from"

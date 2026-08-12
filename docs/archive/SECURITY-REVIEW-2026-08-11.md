@@ -1,3 +1,36 @@
+> # ⚠️ ARCHIVED — SUPERSEDED, AND WRONG ABOUT THE CURRENT SYSTEM
+>
+> **Archived 2026-08-12. Do not use this document to reason about the platform's
+> security posture.** It describes an architecture that no longer exists, and
+> several of its "verified" rows are now false. Audit finding **F-16**.
+>
+> **What changed underneath it:**
+>
+> | This document says | Reality since 2026-08-12 |
+> |---|---|
+> | `ADMIN_ALLOWLIST` gates the admin surface | **`ADMIN_ALLOWLIST` no longer exists anywhere.** Access control is Microsoft Entra ID SSO, single-tenant, on both the Langfuse and Grafana vhosts |
+> | `GET /` returns `403` from a non-allowlisted source | Returns **200** — the UI is public by design and gated by identity |
+> | `/api/public/v2/*`, `/auth/sign-up` return `403` externally | They return **401 / 200** respectively; the REST API is key-authenticated, not IP-gated |
+> | Tailscale is recommended for admin access | **Never adopted.** The identity boundary replaced the network boundary instead |
+> | Single Caddy vhost | Two site blocks: Langfuse and Grafana |
+>
+> **Why it is kept rather than deleted:** its finding IDs are cited by name in
+> the code and in the current audit — `P4` (the `rate_limit` false-pass) is
+> referenced from `scripts/test-caddy-split.sh`, and `P1`–`P3` and `P8` are cited
+> in `AUDIT-2026-08-12.md`. Deleting it would break those references and lose
+> the reasoning behind a fix that is still in force.
+>
+> **Read instead:**
+> - [`AUDIT-2026-08-12.md`](../AUDIT-2026-08-12.md) — the current findings
+> - [`SECURITY-CHECKLIST.md`](../SECURITY-CHECKLIST.md) — the re-runnable verification
+> - `CLAUDE.md` §12 — the current security decisions
+>
+> **The lesson this document is now an example of:** a security document with no
+> expiry is a security document that will eventually mislead. Every claim below
+> was true when written and verified at the time. That was not enough.
+
+---
+
 # Security review — Langfuse Tier 1 (Hetzner + Docker Compose)
 
 **Date:** 2026-08-11 · **Host:** `sportnavi-langfuse.sportnavi.de` (5.9.95.174) · **Status:** review only, no changes applied

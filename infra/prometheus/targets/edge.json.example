@@ -1,0 +1,11 @@
+[
+  {
+    "targets": [
+      "https://langfuse.example.com/api/public/health",
+      "https://grafana.langfuse.example.com/login"
+    ],
+    "labels": {
+      "probe": "edge"
+    }
+  }
+]

@@ -26,16 +26,32 @@ global:
     platform: langfuse
     tier: "1"
 
-# ── ALERTING IS DEFERRED ────────────────────────────────────────────────────
-# Left empty on purpose, not by omission. Alerting comes after a baseline exists
-# and the placeholder thresholds in OPERATIONS.md §2 have been calibrated against
-# real behaviour — alerting on numbers nobody has observed produces noise, and a
-# channel that has learned to ignore alerts is worse than no alerting at all
-# (CLAUDE.md §10.3).
+# ── ALERTING: BASELINE-FREE RULES NOW, CALIBRATED ONES LATER ────────────────
+# This was `rule_files: []` with a note that alerting was deferred until a
+# baseline existed. The audit (F-12) was right that the deferral had gone too
+# far: it left nothing watching the three things that can destroy this platform
+# silently — disk exhaustion, queue backlog, and backup failure.
 #
-# When that work starts, the rules go here and Alertmanager is added to
-# compose.monitoring.yaml.
-rule_files: []
+# The deferral is still correct for THRESHOLD alerts, and those are still
+# absent. What the files below contain is only rules that are true or false
+# independent of any baseline: absence of a metric, a failed probe, an eviction
+# that should be impossible, and a PROJECTION from an observed slope. None of
+# them require a number nobody has measured.
+#
+# The calibrated thresholds from OPERATIONS.md §2 get added alongside these once
+# 2–4 weeks of data exists — added, not substituted.
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+# ⚠️ RULES WITHOUT ROUTING ARE HALF A CONTROL.
+# With no Alertmanager, everything below fires into Prometheus' own UI and pages
+# nobody — which manufactures exactly the false confidence CLAUDE.md §10.3 warns
+# about. Uncomment this and add the alertmanager service once the team has
+# chosen the channel it will actually read.
+# alerting:
+#   alertmanagers:
+#     - static_configs:
+#         - targets: ["alertmanager:9093"]
 # alerting:
 #   alertmanagers:
 #     - static_configs:
@@ -235,6 +251,43 @@ scrape_configs:
         regex: ".*worker.*"
         target_label: probe
         replacement: worker-health
+
+  # ── Edge probe: TLS, DNS and Caddy ────────────────────────────────────────
+  # The job above deliberately bypasses the edge, which leaves certificate
+  # expiry, a broken ACME renewal, a DNS change and a Caddy misconfiguration
+  # all invisible (audit F-14). This one probes the PUBLIC hostname over HTTPS,
+  # so it sees exactly what an agent on Vercel sees.
+  #
+  # It exports probe_ssl_earliest_cert_expiry, which is what
+  # rules/platform.yml's TLSCertificateExpiringSoon evaluates. Without this job
+  # that rule is inert — which is why scripts/health-check.sh checks expiry
+  # independently as well. Two sources, because a certificate that quietly
+  # fails to renew takes every agent's export down at once.
+  #
+  # ⚠️ STILL NOT A SUBSTITUTE FOR THE OFF-HOST MONITOR. This prober runs on the
+  # box it is probing: if the box is down, so is the prober, and the alert that
+  # should fire never does. OPERATIONS.md §5 stands.
+  #
+  # Targets come from a file rather than being inlined because the hostname is
+  # deployment-specific and Prometheus does no environment substitution.
+  # file_sd is re-read live, so adding a hostname needs no restart:
+  #   cp prometheus/targets/edge.json.example prometheus/targets/edge.json
+  #   # edit in the real hostnames
+  - job_name: edge-tls
+    scrape_interval: 60s
+    metrics_path: /probe
+    params:
+      module: [http_2xx]
+    file_sd_configs:
+      - files: ["/etc/prometheus/targets/edge.json"]
+        refresh_interval: 5m
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: blackbox-exporter:9115
 
   # ── Blackbox exporter's own health ────────────────────────────────────────
   # Without this, a dead prober is indistinguishable from a healthy platform:

@@ -104,16 +104,41 @@ if grep -qE '^\s*admin\s+0\.0\.0\.0' caddy/Caddyfile; then
   echo "FAIL: Caddy admin API is bound to 0.0.0.0 — it can reconfigure the proxy"; fail=1
 fi
 
-# ── Grafana is behind the allowlist ───────────────────────────────────────
-# The whole point of the separate site block. If this regressed, an admin
-# surface with a query API over every metric would be public.
+# ── Grafana site block is CONFIGURED for identity, not network position ────
+#
+# ⚠️ READ THE NAME OF THIS CHECK CAREFULLY. It asserts what the file says. It
+# does NOT assert what the running server does, and it cannot.
+#
+# The previous version of this check printed
+#   "PASS: grafana site block is allowlist-gated with a default deny"
+# while an arbitrary internet client was receiving Grafana's /api/health JSON
+# (audit F-01). Six config tests were green against an open surface. The lesson
+# is not that the check was wrong — it is that a check reading a config file
+# must never be phrased as though it observed behaviour.
+#
+# The behavioural counterpart is scripts/test-exposure.sh, which probes the
+# live hostnames and MUST be run from an off-network vantage. Config lint here;
+# evidence there. Neither substitutes for the other.
 if grep -q 'GRAFANA_DOMAIN' caddy/Caddyfile; then
   grafana_block=$(awk '/GRAFANA_DOMAIN/{f=1} f' caddy/Caddyfile)
-  echo "$grafana_block" | grep -q 'remote_ip {\$ADMIN_ALLOWLIST}' \
-    || { echo "FAIL: the Grafana site block does not gate on ADMIN_ALLOWLIST"; fail=1; }
-  echo "$grafana_block" | grep -q 'respond "Not authorized" 403' \
-    || { echo "FAIL: the Grafana site block has no deny-by-default handler"; fail=1; }
-  echo "PASS: grafana site block is allowlist-gated with a default deny"
+  # ADMIN_ALLOWLIST must be ABSENT — it was removed from the deployment
+  # entirely, and Grafana was its last consumer.
+  if echo "$grafana_block" | grep -q 'ADMIN_ALLOWLIST'; then
+    echo "FAIL: ADMIN_ALLOWLIST reintroduced on the Grafana block"; fail=1
+  fi
+  # A deny handler beside the proxying catch-all would black-hole Grafana.
+  if echo "$grafana_block" | grep -q 'respond "Not authorized" 403'; then
+    echo "FAIL: leftover 403 handler on the Grafana block would black-hole the UI"; fail=1
+  fi
+  # The control that replaced the allowlist must actually be wired up. Grafana's
+  # tenant lock is TWO settings and neither alone is sufficient: the app
+  # registration's signInAudience, and this variable.
+  grep -q 'GF_AUTH_AZUREAD_ALLOWED_ORGANIZATIONS' compose.monitoring.yaml \
+    || { echo "FAIL: Grafana has no tenant pin (GF_AUTH_AZUREAD_ALLOWED_ORGANIZATIONS)"; fail=1; }
+  # F-15: replacement operator, or the header ships twice and browsers ignore it.
+  echo "$grafana_block" | grep -q 'header >X-Frame-Options' \
+    || { echo "FAIL: Grafana X-Frame-Options lacks the '>' replacement operator (F-15)"; fail=1; }
+  echo "PASS: grafana site block is CONFIGURED for SSO-only access (config lint, not a live probe)"
 else
   echo "FAIL: no Grafana site block in the Caddyfile"; fail=1
 fi
@@ -144,13 +169,41 @@ else
   echo "PASS: no folded-scalar regexes"
 fi
 
-# ── Alerting really is absent ─────────────────────────────────────────────
-# Deferred by explicit decision until a baseline exists. If rules appear here
-# without that conversation, this catches it.
+# ── Alerting: the baseline-free rules must exist ──────────────────────────
+# This check is inverted from what it used to be. It previously asserted that
+# rule_files was EMPTY, on the grounds that alerting was deferred until a
+# baseline existed. Audit F-12 found that deferral had gone too far: nothing was
+# watching the three things that can destroy this platform silently — disk
+# exhaustion, queue backlog, and backup failure.
+#
+# The deferral still holds for THRESHOLD rules, which are still absent. What
+# must exist are the rules whose truth does not depend on a baseline: absence of
+# a metric, a failed probe, an impossible eviction, and a disk projection.
 if grep -qE '^\s*rule_files:\s*\[\]' prometheus/prometheus.yml; then
-  echo "PASS: alerting rules deferred, as intended"
+  echo "FAIL: rule_files is empty — the baseline-free alert rules are missing (F-12)"; fail=1
 else
-  echo "WARN: rule_files is no longer empty — alerting was deferred until a baseline exists"
+  missing=0
+  for r in backups.yml platform.yml; do
+    [ -f "prometheus/rules/$r" ] || { echo "FAIL: prometheus/rules/$r missing"; missing=1; fail=1; }
+  done
+  # The specific alerts the audit named. Named individually rather than by
+  # counting rules, so that deleting one is a failure rather than a smaller
+  # number nobody notices.
+  for a in BackupMetricsMissing BackupFailed RestoreTestStale \
+           DiskWillFillWithin14Days WorkerQueueGrowingSteadily WorkerQueueMetricsMissing; do
+    grep -rq "alert: $a" prometheus/rules/ \
+      || { echo "FAIL: alert $a is not defined"; missing=1; fail=1; }
+  done
+  [ $missing -eq 0 ] && echo "PASS: baseline-free alert rules present (disk, queue, backup)"
+
+  # Routing is the half that is still missing, and it must stay visible: rules
+  # that fire into Prometheus' own UI page nobody, which manufactures exactly
+  # the false confidence CLAUDE.md §10.3 warns about.
+  if grep -qE '^\s*alerting:' prometheus/prometheus.yml; then
+    echo "PASS: alertmanager routing configured"
+  else
+    echo "WARN: alert rules exist but NO ALERTMANAGER ROUTING — nothing pages yet"
+  fi
 fi
 
 # ── Dashboards ────────────────────────────────────────────────────────────
