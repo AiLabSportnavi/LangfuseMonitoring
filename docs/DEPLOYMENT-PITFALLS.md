@@ -803,6 +803,59 @@ is the fourth.
 
 ---
 
+## 23. Recreating one service applied a network split and 502'd Grafana
+
+**Symptom.** `https://deploy-ui.sportnavi.de/` returned **502** on every path. Grafana itself
+was `Up (healthy)` and answered `/api/health` correctly on its own loopback, so every
+container-level check said the service was fine.
+
+**Cause.** `docker compose -f compose.yaml -f compose.monitoring.yaml up -d grafana` was run
+to apply new SSO environment variables. It did that — but `up -d <service>` applies the
+*whole merged file* to that service, including changes that had nothing to do with the
+intent. `compose.monitoring.yaml` had been updated to split the flat network, moving Grafana
+to `networks: [monitoring]`.
+
+Caddy was **not** recreated, so it stayed on `langfuse` alone. The two containers ended up
+with no network in common and `grafana:3000` stopped resolving:
+
+```
+docker exec langfuse-caddy-1 wget -qO- http://grafana:3000/api/health
+wget: bad address 'grafana:3000'
+```
+
+`compose.monitoring.yaml` predicted this exactly — "Without this override Grafana is
+unreachable after the split and the vhost returns 502, which looks exactly like a broken
+Grafana." The comment was right and was still read too late.
+
+**Fix, without reloading Caddy's config:**
+
+```bash
+docker network connect langfuse_monitoring langfuse-caddy-1
+```
+
+This restores DNS immediately and does **not** re-read the Caddyfile. That mattered here:
+the working tree's Caddyfile had the `ADMIN_ALLOWLIST` gate removed in preparation for the
+SSO cut-over, so recreating Caddy would have dropped the network gate at a moment when
+Grafana's local password form was still enabled. The runtime `network connect` fixed the
+outage without touching the security posture.
+
+It also creates no drift: `compose.monitoring.yaml` already declares
+`caddy: networks: [langfuse, monitoring]`, so the next full deploy makes the same state
+permanent.
+
+**Lessons.**
+
+- **`up -d <one-service>` is not a scoped change.** It applies every pending edit in the
+  merged compose files to that service. If the files moved ahead of the running stack, a
+  one-service command can deliver an unrelated topology change.
+- **A network split must be applied to BOTH ends in the same step**, or to the *consumer*
+  first. Moving the callee off the caller's network is an outage.
+- **"Container healthy" and "service reachable" are different claims.** Grafana's healthcheck
+  passed throughout, because it probes `127.0.0.1:3000` inside the container and can never
+  observe a routing failure. Only an edge probe caught this.
+
+---
+
 ## Diagnostic checklist
 
 When a service will not start, in this order:
