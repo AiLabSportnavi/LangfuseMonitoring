@@ -235,11 +235,35 @@ docker exec "${PROJECT}-ch" clickhouse-client \
 
 # Same principle as Postgres: assert on rows, not on the statement succeeding.
 # A RESTORE that recreates the schema and no data exits 0 and is useless.
-TRACES=$(docker exec "${PROJECT}-ch" clickhouse-client \
+#
+# ⚠️ This deliberately does NOT assert on `observations`. It used to, and the
+# assertion was VACUOUS: it accepted 0, and this platform currently holds 0
+# observations and 0 traces (ingestion has barely run) while holding 276 scores.
+# So the check passed by reading an empty table — it would have gone on passing
+# if RESTORE had recovered no data whatsoever.
+#
+# Asserting on the whole database instead means the check tracks wherever the
+# data actually is, and cannot be defeated by one table happening to be empty.
+# It compares against the live server, so it also catches a PARTIAL restore,
+# which a fixed threshold never would.
+LIVE_ROWS=$($COMPOSE exec -T clickhouse clickhouse-client \
   --user "$CLICKHOUSE_USER" --password "$CLICKHOUSE_PASSWORD" \
-  --query "SELECT count(*) FROM default.observations" 2>/dev/null | tr -d '[:space:]' || echo "ERR")
-case "$TRACES" in ''|*[!0-9]*) fail "observations table did not restore (got: ${TRACES})" ;; esac
-log "clickhouse: OK — ${TRACES} observation(s) restored and queryable"
+  --query "SELECT sum(rows) FROM system.parts WHERE database='default' AND active" \
+  2>/dev/null | tr -d '[:space:]' || echo 0)
+[ -n "$LIVE_ROWS" ] || LIVE_ROWS=0
+
+REST_ROWS=$(docker exec "${PROJECT}-ch" clickhouse-client \
+  --user "$CLICKHOUSE_USER" --password "$CLICKHOUSE_PASSWORD" \
+  --query "SELECT sum(rows) FROM system.parts WHERE database='default' AND active" \
+  2>/dev/null | tr -d '[:space:]' || echo "ERR")
+case "$REST_ROWS" in ''|*[!0-9]*) fail "ClickHouse restore produced no readable tables (got: ${REST_ROWS})" ;; esac
+
+# An empty SOURCE is a legitimate state early in this platform's life, so it is
+# reported rather than failed. An empty restore of a NON-empty source is not.
+if [ "$LIVE_ROWS" -gt 0 ] && [ "$REST_ROWS" -eq 0 ]; then
+  fail "ClickHouse restored 0 rows but the live database holds ${LIVE_ROWS} — restore is not usable"
+fi
+log "clickhouse: OK — ${REST_ROWS} row(s) restored across default.* (live server holds ${LIVE_ROWS})"
 
 # ── 3. MinIO archive ──────────────────────────────────────────────────────────
 # Structural check only. Standing up a MinIO instance and re-uploading proves
