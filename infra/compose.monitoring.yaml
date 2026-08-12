@@ -207,6 +207,34 @@ services:
       # (DEPLOYMENT-PITFALLS.md #11). Setting it true with a broken provider
       # locks every human out of the monitoring UI.
       GF_AUTH_DISABLE_LOGIN_FORM: ${GRAFANA_DISABLE_LOGIN_FORM:-false}
+      # ── THE SECOND PASSWORD DOOR. Disabling the login form is NOT enough. ───
+      # GF_AUTH_DISABLE_LOGIN_FORM only removes the HTML form. Grafana's HTTP
+      # Basic authenticator is a SEPARATE mechanism and defaults to enabled, so
+      # the local admin password keeps working against the whole REST API:
+      #
+      #   curl -u admin:<password> https://<grafana>/api/user   ->  200,
+      #                                                             isGrafanaAdmin:true
+      #
+      # Verified live on 2026-08-12 against this deployment: that request
+      # returned the admin user object while the form was the only thing anyone
+      # had thought to disable. A wrong password returned 401, proving the
+      # password was genuinely being checked rather than the request being
+      # authorised some other way — i.e. a real, working credential path.
+      #
+      # So "SSO is the only authentication method" requires BOTH flags. With
+      # this false, the only way in is an Entra identity; there is no password
+      # that authenticates anywhere, on any interface.
+      #
+      # CONSEQUENCE FOR BREAK-GLASS: the local admin becomes unusable even by
+      # API, so an SSO outage (expired client secret is the likely one) has no
+      # in-band recovery. Recovery is SSH + set GRAFANA_BASIC_AUTH_ENABLED=true
+      # + recreate the container. That is the intended trade, and it is why this
+      # is a variable rather than a hardcoded false.
+      #
+      # ORDER OF OPERATIONS: do not set this false until an Entra identity holds
+      # server-admin, or nobody can administer Grafana at all. See
+      # docs/GRAFANA-SSO.md §5.
+      GF_AUTH_BASIC_ENABLED: ${GRAFANA_BASIC_AUTH_ENABLED:-true}
       # This is a private EU platform (GDPR, CLAUDE.md §4). No callbacks out.
       GF_ANALYTICS_REPORTING_ENABLED: "false"
       GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
