@@ -22,12 +22,12 @@
 # network access to module proxies at deploy time, and the exact bytes that were
 # tested are the exact bytes that ship.
 
-FROM caddy:2.11.4-builder AS builder
+FROM caddy:2.11.6-builder AS builder
 
 RUN xcaddy build v2.11.4 \
     --with github.com/mholt/caddy-ratelimit@v0.1.0
 
-FROM caddy:2.11.4-alpine
+FROM caddy:2.11.7-alpine
 
 COPY --from=builder /usr/bin/caddy /usr/bin/caddy
 
